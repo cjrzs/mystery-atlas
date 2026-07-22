@@ -1,0 +1,2 @@
+"""Mystery Atlas analysis worker."""
+
