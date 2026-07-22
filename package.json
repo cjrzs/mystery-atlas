@@ -4,7 +4,7 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "pnpm --filter @mystery-atlas/web dev",
-    "dev:local": "node scripts/start-local.mjs",
+    "dev:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-local.ps1",
     "build": "pnpm --filter @mystery-atlas/web build",
     "lint": "pnpm --filter @mystery-atlas/web lint",
     "typecheck": "pnpm --filter @mystery-atlas/web typecheck"
