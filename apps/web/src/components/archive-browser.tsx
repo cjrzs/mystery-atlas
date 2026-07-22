@@ -23,7 +23,6 @@ export function ArchiveBrowser() {
         <div>
           <p className="eyebrow">PUBLIC CASE ARCHIVE</p>
           <h1>公共案件档案库</h1>
-          <p>由 AI 整理、管理员逐条核验的推理小说结构化档案。</p>
         </div>
         <div className="archive-stats" aria-label="档案统计">
           <div><strong>128</strong><span>已收录作品</span></div>
@@ -85,4 +84,3 @@ export function ArchiveBrowser() {
     </main>
   );
 }
-

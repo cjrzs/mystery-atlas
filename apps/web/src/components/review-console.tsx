@@ -14,6 +14,8 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import Link from "next/link";
+import { useAuth } from "@/components/auth-provider";
 
 type ReviewStatus = "pending" | "approved" | "rejected";
 
@@ -37,6 +39,7 @@ const seedItems: ReviewRecord[] = [
 ];
 
 export function ReviewConsole() {
+  const { user, loading } = useAuth();
   const [items, setItems] = useState(seedItems);
   const [selectedId, setSelectedId] = useState(seedItems[0].id);
   const [filter, setFilter] = useState<"全部" | "待审核" | "冲突">("全部");
@@ -53,6 +56,32 @@ export function ReviewConsole() {
   const updateStatus = (status: ReviewStatus) => {
     setItems((current) => current.map((item) => item.id === selected.id ? { ...item, status } : item));
   };
+
+  if (loading) {
+    return <main className="access-gate"><span className="account-loading" /><p>正在核验管理员权限</p></main>;
+  }
+
+  if (!user) {
+    return (
+      <main className="access-gate">
+        <AlertTriangle size={24} />
+        <h1>请先登录</h1>
+        <p>公共档案审核台需要管理员账户。</p>
+        <Link className="primary-command" href="/login?next=/admin/review">登录</Link>
+      </main>
+    );
+  }
+
+  if (user.role !== "admin") {
+    return (
+      <main className="access-gate">
+        <AlertTriangle size={24} />
+        <h1>无管理员权限</h1>
+        <p>当前账户可以使用私人书库，但不能维护公共档案。</p>
+        <Link className="secondary-command" href="/library/import">返回私人书库</Link>
+      </main>
+    );
+  }
 
   return (
     <main className="review-page">
@@ -142,4 +171,3 @@ export function ReviewConsole() {
     </main>
   );
 }
-

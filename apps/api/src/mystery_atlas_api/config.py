@@ -6,9 +6,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "谜案经纬 API"
     environment: str = "development"
-    database_url: str = "postgresql+psycopg://mystery_atlas:mystery_atlas@localhost:5432/mystery_atlas"
+    database_url: str = "sqlite:///./.data/mystery-atlas.db"
     redis_url: str = "redis://localhost:6379/0"
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3100",
+        "http://127.0.0.1:3100",
+    ]
+    session_secret: str = "development-only-change-me-please-2026"
+    session_ttl_hours: int = 168
+    upload_dir: str = ".data/uploads"
+    max_upload_mb: int = 50
 
     model_config = SettingsConfigDict(
         env_file=(".env", ".env.local"),

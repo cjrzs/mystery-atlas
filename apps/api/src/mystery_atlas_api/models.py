@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -11,11 +11,26 @@ def new_id() -> str:
     return str(uuid4())
 
 
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+
+
+class User(TimestampMixin, Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(500))
+    display_name: Mapped[str] = mapped_column(String(120))
+    role: Mapped[str] = mapped_column(String(20), default="user", index=True)
+    is_active: Mapped[bool] = mapped_column(default=True)
 
 
 class Work(TimestampMixin, Base):
@@ -200,6 +215,26 @@ class AnalysisJob(TimestampMixin, Base):
     result_summary: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class BookImport(TimestampMixin, Base):
+    __tablename__ = "book_imports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    original_name: Mapped[str] = mapped_column(String(500))
+    stored_path: Mapped[str] = mapped_column(String(1000), unique=True)
+    source_format: Mapped[str] = mapped_column(String(20))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(60), default="waiting")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    detected_title: Mapped[str | None] = mapped_column(String(500))
+    chapter_count: Mapped[int] = mapped_column(Integer, default=0)
+    chapters: Mapped[list] = mapped_column(JSON, default=list)
+    preview: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str | None] = mapped_column(Text)
+
+
 class PrivateLibraryBook(TimestampMixin, Base):
     __tablename__ = "private_library_books"
 
@@ -211,4 +246,3 @@ class PrivateLibraryBook(TimestampMixin, Base):
     current_chapter: Mapped[int] = mapped_column(Integer, default=1)
     progress: Mapped[float] = mapped_column(Float, default=0)
     private_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
-

@@ -1,6 +1,43 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    display_name: str = Field(min_length=1, max_length=120)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    email: EmailStr
+    display_name: str
+    role: Literal["user", "admin"]
+
+
+class BookImportResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    original_name: str
+    source_format: str
+    size_bytes: int
+    status: str
+    stage: str
+    progress: int
+    detected_title: str | None
+    chapter_count: int
+    chapters: list[dict]
+    preview: str
+    error: str | None
 
 
 class WorkSummary(BaseModel):
@@ -58,11 +95,12 @@ class ReviewItem(BaseModel):
 
 class AnalysisJobRequest(BaseModel):
     edition_id: str
-    tracks: list[Literal["reading", "truth"]] = ["reading", "truth"]
+    tracks: list[Literal["reading", "truth"]] = Field(
+        default_factory=lambda: ["reading", "truth"]
+    )
 
 
 class AnalysisJobResponse(BaseModel):
     job_id: str
     status: str
     stages: list[str]
-

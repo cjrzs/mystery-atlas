@@ -27,6 +27,7 @@ import {
   Users,
 } from "lucide-react";
 import { CharacterGraph } from "@/components/character-graph";
+import { AccountButton } from "@/components/auth-provider";
 import { characters, chapterSummaries, evidenceItems, relations, type RelationEdge } from "@/lib/demo-data";
 
 type MainView = "graph" | "timeline" | "chapters" | "clues";
@@ -133,7 +134,7 @@ export function Workbench() {
           {truthMode ? <EyeOff size={15} /> : <Eye size={15} />}{truthMode ? "退出真相" : "真相模式"}
         </button>
         <button className="icon-button" type="button" aria-label="搜索本书"><Search size={18} /></button>
-        <button className="user-chip small" type="button" aria-label="账户">登</button>
+        <AccountButton compact />
       </header>
 
       <div className={`workbench-grid ${readerOpen ? "reader-open" : "reader-closed"} ${inspectorOpen ? "inspector-open" : "inspector-closed"}`}>
@@ -277,4 +278,3 @@ function ChapterView({ chapter }: { chapter: number }) {
 function ClueView({ chapter }: { chapter: number }) {
   return <div className="data-view"><div className="data-view-header"><div><span>线索生命周期</span><h2>支持、反驳与最终回收</h2></div></div><div className="clue-board">{evidenceItems.filter((item) => item.chapter <= chapter).map((item) => <div className="clue-record" key={item.id}><div><span>{item.id}</span><b className={`evidence-state state-${item.state}`}>{item.state}</b></div><h3>{item.title}</h3><p>{item.detail}</p><footer><span>首次出现：第 {item.chapter} 章</span><button type="button">查看证据链</button></footer></div>)}</div></div>;
 }
-

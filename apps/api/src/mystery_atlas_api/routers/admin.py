@@ -1,11 +1,16 @@
 from uuid import uuid4
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 
 from ..demo import REVIEW_ITEMS
 from ..schemas import AnalysisJobRequest, AnalysisJobResponse, ReviewItem
+from ..security import require_admin
 
-router = APIRouter(prefix="/admin", tags=["administration"])
+router = APIRouter(
+    prefix="/admin",
+    tags=["administration"],
+    dependencies=[Depends(require_admin)],
+)
 
 ANALYSIS_STAGES = [
     "chapter_segmentation",
@@ -35,4 +40,3 @@ def create_analysis_job(work_id: str, request: AnalysisJobRequest) -> AnalysisJo
         status="queued",
         stages=ANALYSIS_STAGES,
     )
-
