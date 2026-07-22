@@ -53,7 +53,6 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
       layout: { name: "preset", fit: true, padding: 50 },
       minZoom: 0.55,
       maxZoom: 1.8,
-      wheelSensitivity: 0.18,
       boxSelectionEnabled: false,
       style: [
         {
@@ -68,7 +67,7 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
             color: "#17212b",
             "font-family": "Inter, Noto Sans SC, sans-serif",
             "font-size": 12,
-            "font-weight": 650,
+            "font-weight": 600,
             "text-valign": "bottom",
             "text-margin-y": 8,
             "text-background-color": "#f5f7f8",
