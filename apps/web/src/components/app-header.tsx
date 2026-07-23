@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BookOpenText, BookUp, Search, ShieldCheck } from "lucide-react";
+import { BookOpenText, MessageSquareText, Search, Wrench } from "lucide-react";
 import { AccountButton, useAuth } from "@/components/auth-provider";
 
 export function AppHeader() {
@@ -16,8 +16,8 @@ export function AppHeader() {
       </Link>
       <nav className="primary-nav" aria-label="主导航">
         <Link className={pathname === "/" ? "nav-link active" : "nav-link"} href="/">档案库</Link>
-        <Link className={pathname.startsWith("/library") ? "nav-link active" : "nav-link"} href="/library/import"><BookUp size={15} />私人书库</Link>
-        {user?.role === "admin" && <Link className={pathname.startsWith("/admin") ? "nav-link active" : "nav-link"} href="/admin/review"><ShieldCheck size={15} />审核台</Link>}
+        {user && <Link className={pathname.startsWith("/maintenance") ? "nav-link active" : "nav-link"} href="/maintenance"><Wrench size={15} />维护中心</Link>}
+        {user && <Link className={pathname.startsWith("/feedback") ? "nav-link active" : "nav-link"} href="/feedback"><MessageSquareText size={15} />反馈</Link>}
       </nav>
       <button className="global-search" type="button" aria-label="搜索全部档案">
         <Search size={16} />

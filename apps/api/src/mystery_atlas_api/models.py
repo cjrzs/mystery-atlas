@@ -31,6 +31,9 @@ class User(TimestampMixin, Base):
     display_name: Mapped[str] = mapped_column(String(120))
     role: Mapped[str] = mapped_column(String(20), default="user", index=True)
     is_active: Mapped[bool] = mapped_column(default=True)
+    email_verified: Mapped[bool] = mapped_column(default=True)
+    can_publish: Mapped[bool] = mapped_column(default=True)
+    upload_quota_mb: Mapped[int] = mapped_column(Integer, default=500)
 
 
 class Work(TimestampMixin, Base):
@@ -45,6 +48,11 @@ class Work(TimestampMixin, Base):
     publication_year: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
     cover_key: Mapped[str | None] = mapped_column(String(500))
+    visibility: Mapped[str] = mapped_column(String(20), default="public", index=True)
+    owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    maintainer_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    analysis_progress: Mapped[int] = mapped_column(Integer, default=0)
+    unresolved_feedback_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Edition(TimestampMixin, Base):
@@ -55,10 +63,16 @@ class Edition(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(300))
     language: Mapped[str] = mapped_column(String(20), default="zh-CN")
     publisher: Mapped[str | None] = mapped_column(String(200))
+    translator: Mapped[str | None] = mapped_column(String(200))
     isbn: Mapped[str | None] = mapped_column(String(32), index=True)
     source_format: Mapped[str] = mapped_column(String(20))
-    content_fingerprint: Mapped[str | None] = mapped_column(String(128), unique=True)
+    content_fingerprint: Mapped[str | None] = mapped_column(String(128), index=True)
     is_public_reference: Mapped[bool] = mapped_column(default=False)
+    visibility: Mapped[str] = mapped_column(String(20), default="private", index=True)
+    maintainer_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    is_available: Mapped[bool] = mapped_column(default=True)
+    rights_confirmed: Mapped[bool] = mapped_column(default=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class Chapter(TimestampMixin, Base):
@@ -225,6 +239,15 @@ class BookImport(TimestampMixin, Base):
     source_format: Mapped[str] = mapped_column(String(20))
     size_bytes: Mapped[int] = mapped_column(Integer)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    visibility: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    detected_author: Mapped[str | None] = mapped_column(String(300))
+    publisher: Mapped[str | None] = mapped_column(String(200))
+    translator: Mapped[str | None] = mapped_column(String(200))
+    isbn: Mapped[str | None] = mapped_column(String(32), index=True)
+    rights_confirmed: Mapped[bool] = mapped_column(default=False)
+    work_id: Mapped[str | None] = mapped_column(ForeignKey("works.id", ondelete="SET NULL"), index=True)
+    edition_id: Mapped[str | None] = mapped_column(ForeignKey("editions.id", ondelete="SET NULL"), index=True)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     stage: Mapped[str] = mapped_column(String(60), default="waiting")
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -242,7 +265,55 @@ class PrivateLibraryBook(TimestampMixin, Base):
     user_id: Mapped[str] = mapped_column(String(200), index=True)
     work_id: Mapped[str | None] = mapped_column(ForeignKey("works.id", ondelete="SET NULL"), index=True)
     edition_id: Mapped[str | None] = mapped_column(ForeignKey("editions.id", ondelete="SET NULL"))
+    import_id: Mapped[str | None] = mapped_column(ForeignKey("book_imports.id", ondelete="CASCADE"), index=True)
     object_key: Mapped[str] = mapped_column(String(500), unique=True)
+    kind: Mapped[str] = mapped_column(String(32), default="private_upload", index=True)
     current_chapter: Mapped[int] = mapped_column(Integer, default=1)
     progress: Mapped[float] = mapped_column(Float, default=0)
     private_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class Feedback(TimestampMixin, Base):
+    __tablename__ = "feedback"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    reporter_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    assignee_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    work_id: Mapped[str | None] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    edition_id: Mapped[str | None] = mapped_column(ForeignKey("editions.id", ondelete="CASCADE"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(40), default="work", index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    category: Mapped[str] = mapped_column(String(40), default="content", index=True)
+    chapter: Mapped[int | None] = mapped_column(Integer, index=True)
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    resolution: Mapped[str] = mapped_column(Text, default="")
+    same_issue_count: Mapped[int] = mapped_column(Integer, default=1)
+    is_hidden: Mapped[bool] = mapped_column(default=False)
+    resolved_revision_id: Mapped[str | None] = mapped_column(String(36))
+
+
+class ContentRevision(TimestampMixin, Base):
+    __tablename__ = "content_revisions"
+    __table_args__ = (UniqueConstraint("work_id", "version", name="uq_revision_work_version"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    work_id: Mapped[str] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), index=True)
+    edition_id: Mapped[str | None] = mapped_column(ForeignKey("editions.id", ondelete="SET NULL"), index=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    source_feedback_id: Mapped[str | None] = mapped_column(ForeignKey("feedback.id", ondelete="SET NULL"))
+    version: Mapped[int] = mapped_column(Integer)
+    summary: Mapped[str] = mapped_column(Text)
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class Notification(TimestampMixin, Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(300))
+    body: Mapped[str] = mapped_column(Text, default="")
+    link: Mapped[str] = mapped_column(String(500), default="")
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

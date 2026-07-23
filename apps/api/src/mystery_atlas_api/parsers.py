@@ -79,7 +79,7 @@ def split_text_chapters(text: str) -> list[dict]:
     matches = list(CHAPTER_PATTERN.finditer(text))
     if not matches:
         clean = text.strip()
-        return [{"number": 1, "title": "正文", "characters": len(clean)}]
+        return [{"number": 1, "title": "正文", "characters": len(clean), "text": clean}]
 
     chapters: list[dict] = []
     for index, match in enumerate(matches):
@@ -91,6 +91,7 @@ def split_text_chapters(text: str) -> list[dict]:
                 "number": index + 1,
                 "title": " ".join(match.group(1).split())[:160],
                 "characters": len(body),
+                "text": body,
             }
         )
     return chapters
@@ -180,6 +181,7 @@ def parse_epub(path: Path, original_name: str | None = None) -> ParsedBook:
                     "number": len(chapters) + 1,
                     "title": collector.title or f"章节 {len(chapters) + 1}",
                     "characters": len(text),
+                    "text": text,
                 }
             )
 

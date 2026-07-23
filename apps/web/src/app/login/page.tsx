@@ -32,7 +32,7 @@ function LoginContent() {
   const nextPath = searchParams.get("next");
   const destination = nextPath?.startsWith("/") && !nextPath.startsWith("//")
     ? nextPath
-    : "/library/import";
+    : "/";
 
   useEffect(() => {
     if (!loading && user) router.replace(destination);

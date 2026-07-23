@@ -63,8 +63,28 @@ def get_current_user(
     return user
 
 
+def get_optional_user(
+    session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+    session: Session = Depends(get_session),
+) -> User | None:
+    if not session_token:
+        return None
+    try:
+        payload = jwt.decode(
+            session_token,
+            get_settings().session_secret,
+            algorithms=[ALGORITHM],
+        )
+        user_id = payload.get("sub")
+    except InvalidTokenError:
+        return None
+    if not isinstance(user_id, str):
+        return None
+    user = session.get(User, user_id)
+    return user if user is not None and user.is_active else None
+
+
 def require_admin(user: User = Depends(get_current_user)) -> User:
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user
-

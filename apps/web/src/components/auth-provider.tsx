@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { createContext, ReactNode, useContext, useEffect, useState } from "react";
-import { BookUp, LogOut, ShieldCheck, UserRound } from "lucide-react";
+import { BookUp, LogOut, UserRound, Wrench } from "lucide-react";
 import { apiRequest, CurrentUser } from "@/lib/api";
 
 type Credentials = { email: string; password: string };
@@ -94,8 +94,8 @@ export function AccountButton({ compact = false }: { compact?: boolean }) {
       </summary>
       <div className="account-popover">
         <header><strong>{user.display_name}</strong><span>{user.email}</span></header>
-        <Link href="/library/import"><BookUp size={14} />私人书库</Link>
-        {user.role === "admin" && <Link href="/admin/review"><ShieldCheck size={14} />管理员审核台</Link>}
+        <Link href="/?scope=private"><BookUp size={14} />私人档案</Link>
+        <Link href="/maintenance"><Wrench size={14} />档案维护中心</Link>
         <button type="button" onClick={() => void logout()}><LogOut size={14} />退出登录</button>
       </div>
     </details>

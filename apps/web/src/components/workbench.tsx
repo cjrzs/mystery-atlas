@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   BookOpen,
@@ -27,8 +27,9 @@ import {
   Users,
 } from "lucide-react";
 import { CharacterGraph } from "@/components/character-graph";
-import { AccountButton } from "@/components/auth-provider";
+import { AccountButton, useAuth } from "@/components/auth-provider";
 import { characters, chapterSummaries, evidenceItems, relations, type RelationEdge } from "@/lib/demo-data";
+import { apiRequest, type LibraryItem, type ReaderBook } from "@/lib/api";
 
 type MainView = "graph" | "timeline" | "chapters" | "clues";
 type InspectorTab = "details" | "evidence" | "assistant";
@@ -48,7 +49,8 @@ const readerParagraphs = [
   "如果有人提前释放配重，十点的钟声就不再是死亡时间的证明。它只证明，有人希望所有人相信梁秉文在十点仍然活着。",
 ];
 
-export function Workbench() {
+export function Workbench({ slug, libraryItemId }: { slug?: string; libraryItemId?: string }) {
+  const { user } = useAuth();
   const [readerOpen, setReaderOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [mainView, setMainView] = useState<MainView>("graph");
@@ -61,6 +63,52 @@ export function Workbench() {
   const [messages, setMessages] = useState<{ role: "user" | "assistant"; text: string }[]>([
     { role: "assistant", text: "我只会使用第 1 至 8 章已公开的信息。你可以询问当前人物、证词矛盾或某条线索。" },
   ]);
+  const [readerBook, setReaderBook] = useState<ReaderBook | null>(null);
+  const [readerChapterNumber, setReaderChapterNumber] = useState(1);
+  const [libraryRecordId, setLibraryRecordId] = useState<string | null>(libraryItemId ?? null);
+
+  useEffect(() => {
+    if (!slug && !libraryItemId) return;
+    let active = true;
+    const path = libraryItemId ? `/library/${libraryItemId}/reader` : `/works/${slug}/reader`;
+    apiRequest<ReaderBook>(path)
+      .then(async (book) => {
+        if (!active) return;
+        setReaderBook(book);
+        if (user && book.visibility === "public" && !libraryItemId) {
+          const record = await apiRequest<LibraryItem>(`/library/public/${book.edition_id}`, { method: "POST" });
+          if (!active) return;
+          setLibraryRecordId(record.id);
+          setReaderChapterNumber(record.current_chapter);
+          setChapter(record.current_chapter);
+        } else {
+          setReaderChapterNumber(1);
+          setChapter(1);
+        }
+      })
+      .catch(() => {
+        if (active) setReaderBook(null);
+      });
+    return () => { active = false; };
+  }, [libraryItemId, slug, user]);
+
+  const readerChapter = readerBook?.chapters.find((item) => item.number === readerChapterNumber);
+  const readerMaxChapter = readerBook?.chapters.length ?? 18;
+  const readerText = readerChapter?.text
+    ? readerChapter.text.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean)
+    : readerParagraphs;
+
+  const moveReader = (next: number) => {
+    const bounded = Math.max(1, Math.min(readerMaxChapter, next));
+    setReaderChapterNumber(bounded);
+    setChapter(bounded);
+    if (libraryRecordId) {
+      void apiRequest(`/library/${libraryRecordId}/progress`, {
+        method: "PATCH",
+        body: JSON.stringify({ current_chapter: bounded, progress: bounded / readerMaxChapter }),
+      });
+    }
+  };
 
   const selectedCharacter = selection.type === "node" ? characters.find((item) => item.id === selection.id) : undefined;
   const selectedRelation = selection.type === "edge" ? relations.find((item) => item.id === selection.id) : undefined;
@@ -87,10 +135,10 @@ export function Workbench() {
       const accepted = window.confirm("真相模式会显示全书身份、动机和案件结论。确认进入吗？");
       if (!accepted) return;
       setTruthMode(true);
-      setChapter(18);
+      setChapter(readerMaxChapter);
     } else {
       setTruthMode(false);
-      setChapter(8);
+      setChapter(readerChapterNumber);
     }
   };
 
@@ -111,8 +159,8 @@ export function Workbench() {
       <header className="workbench-topbar">
         <Link href="/" className="icon-button" aria-label="返回公共档案"><ArrowLeft size={18} /></Link>
         <div className="work-title">
-          <div className="mini-cover cover-teal" aria-hidden="true">雾</div>
-          <div><strong>雾港钟楼</strong><span>公共档案 · 已核验版本 1.4</span></div>
+          <div className="mini-cover cover-teal" aria-hidden="true">{(readerBook?.work_title || "雾").slice(0, 1)}</div>
+          <div><strong>{readerBook?.work_title || "雾港钟楼"}</strong><span>{readerBook ? `${readerBook.visibility === "public" ? "公共" : "私人"}档案 · ${readerBook.edition_title}` : "演示档案"}</span></div>
         </div>
         <div className="topbar-spacer" />
         <label className="chapter-horizon">
@@ -120,11 +168,11 @@ export function Workbench() {
           <input
             type="range"
             min="1"
-            max="18"
+            max={readerMaxChapter}
             value={chapter}
             onChange={(event) => {
               const next = Number(event.target.value);
-              if (next > 8 && !truthMode && !window.confirm(`你的阅读进度是第 8 章。确定查看第 ${next} 章的信息吗？`)) return;
+              if (next > readerChapterNumber && !truthMode && !window.confirm(`你的阅读进度是第 ${readerChapterNumber} 章。确定查看第 ${next} 章的信息吗？`)) return;
               setChapter(next);
             }}
           />
@@ -134,25 +182,26 @@ export function Workbench() {
           {truthMode ? <EyeOff size={15} /> : <Eye size={15} />}{truthMode ? "退出真相" : "真相模式"}
         </button>
         <button className="icon-button" type="button" aria-label="搜索本书"><Search size={18} /></button>
+        <Link className="icon-button" href={`/feedback${readerBook ? `?work_id=${readerBook.work_id}&edition_id=${readerBook.edition_id}&chapter=${chapter}` : ""}`} aria-label="反馈当前内容"><MessageSquareText size={18} /></Link>
         <AccountButton compact />
       </header>
 
       <div className={`workbench-grid ${readerOpen ? "reader-open" : "reader-closed"} ${inspectorOpen ? "inspector-open" : "inspector-closed"}`}>
         <aside className="reader-panel" aria-label="小说阅读器">
           <div className="panel-heading">
-            <div><BookOpen size={17} /><strong>阅读器</strong><span>私人版本已绑定</span></div>
+            <div><BookOpen size={17} /><strong>阅读器</strong><span>{readerBook ? "真实正文" : "演示正文"}</span></div>
             <button className="icon-button compact" onClick={() => setReaderOpen(false)} type="button" title="收起阅读器"><PanelLeftClose size={17} /></button>
           </div>
           <div className="reader-chapter-nav">
-            <button type="button" aria-label="上一章"><ChevronLeft size={16} /></button>
-            <div><span>第 8 章</span><strong>第二枚钟锤</strong></div>
-            <button type="button" aria-label="下一章"><ChevronRight size={16} /></button>
+            <button disabled={readerChapterNumber <= 1} onClick={() => moveReader(readerChapterNumber - 1)} type="button" aria-label="上一章"><ChevronLeft size={16} /></button>
+            <div><span>第 {readerChapter?.number ?? 8} 章</span><strong>{readerChapter?.title ?? "第二枚钟锤"}</strong></div>
+            <button disabled={readerChapterNumber >= readerMaxChapter} onClick={() => moveReader(readerChapterNumber + 1)} type="button" aria-label="下一章"><ChevronRight size={16} /></button>
           </div>
           <article className="reader-copy">
-            <h1>第二枚钟锤</h1>
-            {readerParagraphs.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
+            <h1>{readerChapter?.title ?? "第二枚钟锤"}</h1>
+            {readerText.map((paragraph, index) => <p key={`${index}-${paragraph.slice(0, 20)}`}>{paragraph}</p>)}
           </article>
-          <div className="reader-footer"><span>阅读进度 44%</span><span>位置 1,284 / 2,903</span></div>
+          <div className="reader-footer"><span>阅读进度 {Math.round((readerChapterNumber / readerMaxChapter) * 100)}%</span><span>第 {readerChapterNumber} / {readerMaxChapter} 章</span></div>
         </aside>
 
         <section className="database-panel">

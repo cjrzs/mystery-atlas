@@ -1,12 +1,5 @@
-import { AppHeader } from "@/components/app-header";
-import { ReviewConsole } from "@/components/review-console";
+import { redirect } from "next/navigation";
 
-export default function ReviewPage() {
-  return (
-    <div className="site-shell">
-      <AppHeader />
-      <ReviewConsole />
-    </div>
-  );
+export default function LegacyReviewPage() {
+  redirect("/maintenance");
 }
-
