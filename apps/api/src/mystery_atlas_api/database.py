@@ -30,6 +30,7 @@ def ensure_development_columns() -> None:
             "email_verified": "BOOLEAN NOT NULL DEFAULT 1",
             "can_publish": "BOOLEAN NOT NULL DEFAULT 1",
             "upload_quota_mb": "INTEGER NOT NULL DEFAULT 500",
+            "reader_preferences": "JSON NOT NULL DEFAULT '{}'",
         },
         "works": {
             "visibility": "VARCHAR(20) NOT NULL DEFAULT 'public'",
@@ -37,6 +38,7 @@ def ensure_development_columns() -> None:
             "maintainer_id": "VARCHAR(36)",
             "analysis_progress": "INTEGER NOT NULL DEFAULT 0",
             "unresolved_feedback_count": "INTEGER NOT NULL DEFAULT 0",
+            "tags": "JSON NOT NULL DEFAULT '[]'",
         },
         "editions": {
             "translator": "VARCHAR(200)",
@@ -49,6 +51,7 @@ def ensure_development_columns() -> None:
         "book_imports": {
             "visibility": "VARCHAR(20) NOT NULL DEFAULT 'pending'",
             "detected_author": "VARCHAR(300)",
+            "detected_tags": "JSON NOT NULL DEFAULT '[]'",
             "publisher": "VARCHAR(200)",
             "translator": "VARCHAR(200)",
             "isbn": "VARCHAR(32)",

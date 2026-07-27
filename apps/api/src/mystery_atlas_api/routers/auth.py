@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..database import get_session
 from ..models import User
-from ..schemas import LoginRequest, RegisterRequest, UserResponse
+from ..schemas import LoginRequest, ReaderPreferences, RegisterRequest, UserResponse
 from ..security import (
     SESSION_COOKIE,
     create_session_token,
@@ -24,7 +24,11 @@ def set_session_cookie(response: Response, user: User) -> None:
         value=create_session_token(user),
         max_age=settings.session_ttl_hours * 60 * 60,
         httponly=True,
-        secure=settings.environment == "production",
+        secure=(
+            settings.session_cookie_secure
+            if settings.session_cookie_secure is not None
+            else settings.environment == "production"
+        ),
         samesite="lax",
         path="/",
     )
@@ -41,7 +45,12 @@ def register(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该邮箱已经注册")
 
     user_count = session.scalar(select(func.count()).select_from(User)) or 0
-    role = "admin" if get_settings().environment == "development" and user_count == 0 else "user"
+    current_settings = get_settings()
+    first_user_is_admin = (
+        current_settings.environment == "development"
+        or current_settings.first_user_admin
+    )
+    role = "admin" if first_user_is_admin and user_count == 0 else "user"
     user = User(
         email=email,
         display_name=request.display_name.strip(),
@@ -79,3 +88,20 @@ def logout(response: Response) -> None:
 def me(user: User = Depends(get_current_user)) -> User:
     return user
 
+
+@router.get("/reader-preferences", response_model=ReaderPreferences)
+def get_reader_preferences(
+    user: User = Depends(get_current_user),
+) -> ReaderPreferences:
+    return ReaderPreferences.model_validate(user.reader_preferences or {})
+
+
+@router.patch("/reader-preferences", response_model=ReaderPreferences)
+def update_reader_preferences(
+    request: ReaderPreferences,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> ReaderPreferences:
+    user.reader_preferences = request.model_dump()
+    session.commit()
+    return request

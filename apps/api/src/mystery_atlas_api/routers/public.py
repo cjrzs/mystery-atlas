@@ -2,12 +2,37 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..analysis_views import workbench_analysis
 from ..database import get_session
 from ..demo import EDGES, NODES, WORKS
-from ..models import BookImport, CaseRecord, Edition, Evidence, Person, User, Work
-from ..schemas import GraphSnapshot, ReaderResponse, WorkSummary
+from ..models import (
+    BookImport,
+    CaseRecord,
+    Edition,
+    Evidence,
+    Person,
+    PersonRelation,
+    User,
+    Work,
+)
+from ..parsers import ensure_chapter_blocks
+from ..schemas import (
+    GraphEdge,
+    GraphNode,
+    GraphSnapshot,
+    ReaderResponse,
+    WorkbenchAnalysisResponse,
+    WorkSummary,
+)
 
 router = APIRouter(prefix="/works", tags=["public works"])
+
+
+def work_tags(work: Work) -> list[str]:
+    if work.tags:
+        return list(work.tags)
+    demo = next((item for item in WORKS if item.slug == work.slug), None)
+    return list(demo.tags) if demo else []
 
 
 def work_summary(work: Work, session: Session) -> WorkSummary:
@@ -19,7 +44,7 @@ def work_summary(work: Work, session: Session) -> WorkSummary:
         author=work.author,
         region=work.region or "",
         year=work.publication_year or 0,
-        tags=[],
+        tags=work_tags(work),
         cases=session.scalar(
             select(func.count()).select_from(CaseRecord).where(CaseRecord.work_id == work.id)
         ) or 0,
@@ -106,9 +131,27 @@ def get_reader(
         author=work.author,
         edition_id=edition.id,
         edition_title=edition.title,
+        language=edition.language,
         visibility=edition.visibility,
-        chapters=book_import.chapters,
+        chapters=[
+            ensure_chapter_blocks(chapter, source_format=book_import.source_format)
+            for chapter in book_import.chapters
+        ],
     )
+
+
+@router.get("/{slug}/analysis", response_model=WorkbenchAnalysisResponse)
+def get_workbench_analysis(
+    slug: str,
+    through_chapter: int = Query(default=1, ge=1, le=999),
+    session: Session = Depends(get_session),
+) -> WorkbenchAnalysisResponse:
+    work = session.scalar(
+        select(Work).where(Work.slug == slug, Work.visibility == "public")
+    )
+    if work is None:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    return workbench_analysis(work, through_chapter, session)
 
 
 @router.get("/{slug}/graph", response_model=GraphSnapshot)
@@ -121,11 +164,67 @@ def get_graph(
         select(Work.id).where(Work.slug == slug, Work.visibility == "public")
     )
     if exists is not None:
+        people = list(
+            session.scalars(
+                select(Person).where(
+                    Person.work_id == exists,
+                    Person.first_chapter <= through_chapter,
+                )
+            )
+        )
+        person_ids = {person.id for person in people}
+        relations = list(
+            session.scalars(
+                select(PersonRelation).where(
+                    PersonRelation.work_id == exists,
+                    PersonRelation.first_chapter <= through_chapter,
+                    PersonRelation.source_person_id.in_(person_ids),
+                    PersonRelation.target_person_id.in_(person_ids),
+                )
+            )
+        ) if person_ids else []
+        evidence_ids = {
+            relation.evidence_id for relation in relations if relation.evidence_id
+        }
+        evidence_by_id = {
+            item.id: item
+            for item in session.scalars(
+                select(Evidence).where(Evidence.id.in_(evidence_ids))
+            )
+        } if evidence_ids else {}
         return GraphSnapshot(
             work_slug=slug,
             through_chapter=through_chapter,
-            nodes=[],
-            edges=[],
+            nodes=[
+                GraphNode(
+                    id=person.id,
+                    name=person.canonical_name,
+                    role=person.role,
+                    group=person.identity_status,
+                    first_chapter=person.first_chapter,
+                    description=person.description,
+                )
+                for person in people
+            ],
+            edges=[
+                GraphEdge(
+                    id=relation.id,
+                    source=relation.source_person_id,
+                    target=relation.target_person_id,
+                    label=relation.label,
+                    kind=relation.kind,
+                    status=relation.status
+                    if relation.status in {"confirmed", "inferred", "disputed"}
+                    else "inferred",
+                    first_chapter=relation.first_chapter,
+                    evidence=(
+                        evidence_by_id[relation.evidence_id].citation.get("excerpt", "")
+                        if relation.evidence_id in evidence_by_id
+                        else ""
+                    ),
+                )
+                for relation in relations
+            ],
         )
     if not any(item.slug == slug for item in WORKS):
         raise HTTPException(status_code=404, detail="作品不存在")

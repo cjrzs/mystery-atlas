@@ -1,49 +1,155 @@
 name: mystery-atlas
 
+x-app-environment: &app-environment
+  MYSTERY_ATLAS_ENVIRONMENT: production
+  MYSTERY_ATLAS_DATABASE_URL: postgresql+psycopg://mystery_atlas:${MYSTERY_ATLAS_POSTGRES_PASSWORD:-mystery_atlas}@postgres:5432/mystery_atlas
+  MYSTERY_ATLAS_REDIS_URL: redis://redis:6379/0
+  MYSTERY_ATLAS_CORS_ORIGINS: '["http://localhost:${MYSTERY_ATLAS_WEB_PORT:-3100}","http://127.0.0.1:${MYSTERY_ATLAS_WEB_PORT:-3100}"]'
+  MYSTERY_ATLAS_SESSION_SECRET: ${MYSTERY_ATLAS_SESSION_SECRET:-local-docker-session-secret-change-before-public-use}
+  MYSTERY_ATLAS_SESSION_COOKIE_SECURE: ${MYSTERY_ATLAS_SESSION_COOKIE_SECURE:-false}
+  MYSTERY_ATLAS_FIRST_USER_ADMIN: ${MYSTERY_ATLAS_FIRST_USER_ADMIN:-true}
+  MYSTERY_ATLAS_UPLOAD_DIR: /data/uploads
+  MYSTERY_ATLAS_S3_ENDPOINT: http://minio:9000
+  MYSTERY_ATLAS_S3_ACCESS_KEY: ${MYSTERY_ATLAS_MINIO_ROOT_USER:-mystery_atlas}
+  MYSTERY_ATLAS_S3_SECRET_KEY: ${MYSTERY_ATLAS_MINIO_ROOT_PASSWORD:-change-this-before-public-use}
+  MYSTERY_ATLAS_S3_BUCKET: private-library
+  MYSTERY_ATLAS_AI_PROVIDER: openai-compatible
+  MYSTERY_ATLAS_AI_BASE_URL: ${MYSTERY_ATLAS_AI_BASE_URL:-}
+  MYSTERY_ATLAS_AI_API_KEY: ${MYSTERY_ATLAS_AI_API_KEY:-}
+  MYSTERY_ATLAS_AI_READING_MODEL: ${MYSTERY_ATLAS_AI_READING_MODEL:-}
+  MYSTERY_ATLAS_AI_TRUTH_MODEL: ${MYSTERY_ATLAS_AI_TRUTH_MODEL:-}
+  MYSTERY_ATLAS_AI_MAX_CONCURRENCY: ${MYSTERY_ATLAS_AI_MAX_CONCURRENCY:-10}
+  MYSTERY_ATLAS_ANALYSIS_EXECUTION: celery
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: mystery_atlas
       POSTGRES_USER: mystery_atlas
-      POSTGRES_PASSWORD: mystery_atlas
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${MYSTERY_ATLAS_POSTGRES_PASSWORD:-mystery_atlas}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mystery_atlas -d mystery_atlas"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
+    restart: unless-stopped
 
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
+    restart: unless-stopped
 
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: mystery_atlas
-      MINIO_ROOT_PASSWORD: change-this-in-production
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+      MINIO_ROOT_USER: ${MYSTERY_ATLAS_MINIO_ROOT_USER:-mystery_atlas}
+      MINIO_ROOT_PASSWORD: ${MYSTERY_ATLAS_MINIO_ROOT_PASSWORD:-change-this-before-public-use}
     volumes:
       - minio-data:/data
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
+    environment: *app-environment
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        alembic upgrade head
+        python -m mystery_atlas_api.deployment migrate-legacy
+        python -m mystery_atlas_api.reader_backfill --upload-root /data/uploads
+    volumes:
+      - ../../.data:/legacy:ro
+      - uploads-data:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
+    environment: *app-environment
+    volumes:
+      - uploads-data:/data/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
+    environment: *app-environment
+    command:
+      - celery
+      - --app
+      - mystery_atlas_analyzer.tasks.app
+      - worker
+      - --loglevel=INFO
+      - --concurrency=2
+      - --uid=nobody
+    volumes:
+      - uploads-data:/data/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        MYSTERY_ATLAS_API_ORIGIN: http://api:8010
+    environment:
+      MYSTERY_ATLAS_API_ORIGIN: http://api:8010
+    ports:
+      - "${MYSTERY_ATLAS_WEB_PORT:-3100}:3100"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3100').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
 
 volumes:
   postgres-data:
   redis-data:
   minio-data:
-
+  uploads-data:

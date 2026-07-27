@@ -34,6 +34,7 @@ class User(TimestampMixin, Base):
     email_verified: Mapped[bool] = mapped_column(default=True)
     can_publish: Mapped[bool] = mapped_column(default=True)
     upload_quota_mb: Mapped[int] = mapped_column(Integer, default=500)
+    reader_preferences: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Work(TimestampMixin, Base):
@@ -44,6 +45,7 @@ class Work(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(300), index=True)
     author: Mapped[str] = mapped_column(String(200), index=True)
     synopsis: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     region: Mapped[str | None] = mapped_column(String(80))
     publication_year: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
@@ -252,6 +254,7 @@ class BookImport(TimestampMixin, Base):
     stage: Mapped[str] = mapped_column(String(60), default="waiting")
     progress: Mapped[int] = mapped_column(Integer, default=0)
     detected_title: Mapped[str | None] = mapped_column(String(500))
+    detected_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     chapter_count: Mapped[int] = mapped_column(Integer, default=0)
     chapters: Mapped[list] = mapped_column(JSON, default=list)
     preview: Mapped[str] = mapped_column(Text, default="")

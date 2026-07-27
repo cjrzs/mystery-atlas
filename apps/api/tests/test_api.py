@@ -55,9 +55,26 @@ def test_register_login_and_session_cookie(client: TestClient) -> None:
     )
     assert login.status_code == 200
 
+    preferences = {
+        "font_size": 19,
+        "line_height": 2.1,
+        "content_width": 780,
+        "theme": "dark",
+    }
+    updated = client.patch(
+        "/api/v1/auth/reader-preferences",
+        json=preferences,
+    )
+    assert updated.status_code == 200
+    assert client.get("/api/v1/auth/reader-preferences").json() == preferences
+
 
 def test_upload_and_parse_txt(client: TestClient) -> None:
-    content = """第一章 雾港\n沈砚在夜里抵达钟楼。\n第二章 晚宴\n梁家众人围绕遗嘱争执。\n"""
+    content = (
+        "书名：雾港测试\n作者：测试作者\n出版社：测试出版社\n"
+        "ISBN：978-7-0000-0000-1\n标签：本格、密室\n\n"
+        "第一章 雾港\n沈砚在夜里抵达钟楼。\n第二章 晚宴\n梁家众人围绕遗嘱争执。\n"
+    )
     response = client.post(
         "/api/v1/imports",
         files={"file": ("雾港测试.txt", content.encode("utf-8"), "text/plain")},
@@ -69,17 +86,16 @@ def test_upload_and_parse_txt(client: TestClient) -> None:
     assert parsed.status_code == 200
     assert parsed.json()["status"] == "completed"
     assert parsed.json()["detected_title"] == "雾港测试"
+    assert parsed.json()["detected_author"] == "测试作者"
+    assert parsed.json()["publisher"] == "测试出版社"
+    assert parsed.json()["isbn"] == "9787000000001"
+    assert parsed.json()["detected_tags"] == ["本格", "密室"]
     assert parsed.json()["chapter_count"] == 2
     assert parsed.json()["stage"] == "awaiting_confirmation"
 
     finalized = client.post(
         f"/api/v1/imports/{import_id}/finalize",
         json={
-            "title": "雾港测试",
-            "author": "测试作者",
-            "publisher": "测试出版社",
-            "translator": None,
-            "isbn": "978-7-0000-0000-1",
             "visibility": "public",
             "rights_confirmed": True,
         },
@@ -89,6 +105,12 @@ def test_upload_and_parse_txt(client: TestClient) -> None:
     assert finalized.json()["work_id"]
     assert finalized.json()["edition_id"]
 
+    analysis = client.get(f"/api/v1/imports/{import_id}/analysis")
+    assert analysis.status_code == 200
+    assert analysis.json()["track"] == "full"
+    assert analysis.json()["status"] == "waiting_configuration"
+    assert analysis.json()["stage"] == "waiting_for_ai_configuration"
+
     duplicate_upload = client.post(
         "/api/v1/imports",
         files={"file": ("雾港重复.txt", content.encode("utf-8"), "text/plain")},
@@ -97,11 +119,6 @@ def test_upload_and_parse_txt(client: TestClient) -> None:
     duplicate = client.post(
         f"/api/v1/imports/{duplicate_upload.json()['id']}/finalize",
         json={
-            "title": "雾港测试",
-            "author": "测试作者",
-            "publisher": "测试出版社",
-            "translator": None,
-            "isbn": "978-7-0000-0000-1",
             "visibility": "private",
             "rights_confirmed": False,
         },
@@ -110,14 +127,19 @@ def test_upload_and_parse_txt(client: TestClient) -> None:
 
     works = client.get("/api/v1/works")
     uploaded = next(item for item in works.json() if item["title"] == "雾港测试")
+    assert uploaded["tags"] == ["本格", "密室"]
     reader = client.get(f"/api/v1/works/{uploaded['slug']}/reader")
     assert reader.status_code == 200
     assert len(reader.json()["chapters"]) == 2
     assert "沈砚" in reader.json()["chapters"][0]["text"]
+    assert reader.json()["chapters"][0]["blocks"] == [
+        {"type": "paragraph", "text": "沈砚在夜里抵达钟楼。"}
+    ]
 
     library = client.get("/api/v1/library")
     assert library.status_code == 200
-    assert any(item["title"] == "雾港测试" for item in library.json())
+    library_item = next(item for item in library.json() if item["title"] == "雾港测试")
+    assert library_item["tags"] == ["本格", "密室"]
 
     feedback = client.post(
         "/api/v1/feedback",

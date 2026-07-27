@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { createContext, ReactNode, useContext, useEffect, useState } from "react";
 import { BookUp, LogOut, UserRound, Wrench } from "lucide-react";
-import { apiRequest, CurrentUser } from "@/lib/api";
+import { apiRequest, AUTH_REQUIRED_EVENT, CurrentUser } from "@/lib/api";
 
 type Credentials = { email: string; password: string };
 type Registration = Credentials & { display_name: string };
@@ -40,6 +40,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .catch(() => { if (active) setUser(null); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const handleUnauthorized = () => setUser(null);
+    window.addEventListener(AUTH_REQUIRED_EVENT, handleUnauthorized);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, handleUnauthorized);
   }, []);
 
   const login = async (credentials: Credentials) => {

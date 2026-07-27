@@ -2,18 +2,18 @@
 
 import cytoscape, { Core } from "cytoscape";
 import { useEffect, useMemo, useRef } from "react";
-import type { CharacterNode, RelationEdge } from "@/lib/demo-data";
+import type { GraphEdge, GraphNode } from "@/lib/api";
 
 type GraphSelection =
   | { type: "node"; id: string }
   | { type: "edge"; id: string };
 
 type CharacterGraphProps = {
-  nodes: CharacterNode[];
-  edges: RelationEdge[];
+  nodes: GraphNode[];
+  edges: GraphEdge[];
   chapter: number;
-  visibleKinds: Set<RelationEdge["kind"]>;
-  selectedId: string;
+  visibleKinds: Set<string>;
+  selectedId: string | null;
   onSelect: (selection: GraphSelection) => void;
 };
 
@@ -21,27 +21,51 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<Core | null>(null);
 
-  const elements = useMemo(() => {
-    const visibleNodes = nodes.filter((node) => node.firstChapter <= chapter);
+  const { elements, coreNodeIds } = useMemo(() => {
+    const visibleNodes = nodes.filter((node) => node.first_chapter <= chapter);
     const nodeIds = new Set(visibleNodes.map((node) => node.id));
     const visibleEdges = edges.filter((edge) => (
-      edge.firstChapter <= chapter
+      edge.first_chapter <= chapter
       && nodeIds.has(edge.source)
       && nodeIds.has(edge.target)
       && visibleKinds.has(edge.kind)
     ));
+    const degreeByNode = new Map(visibleNodes.map((node) => [node.id, 0]));
+    for (const edge of visibleEdges) {
+      degreeByNode.set(edge.source, (degreeByNode.get(edge.source) ?? 0) + 1);
+      degreeByNode.set(edge.target, (degreeByNode.get(edge.target) ?? 0) + 1);
+    }
+    const coreCount = visibleNodes.length >= 12 ? 3 : visibleNodes.length >= 5 ? 2 : 1;
+    const coreNodeIds = new Set(
+      [...visibleNodes]
+        .sort((left, right) => (
+          (degreeByNode.get(right.id) ?? 0) - (degreeByNode.get(left.id) ?? 0)
+          || left.first_chapter - right.first_chapter
+          || left.name.localeCompare(right.name, "zh-CN")
+        ))
+        .slice(0, coreCount)
+        .map((node) => node.id),
+    );
 
-    return [
-      ...visibleNodes.map((node) => ({
-        data: { id: node.id, label: node.name, role: node.role, group: node.group },
-        position: { x: node.x, y: node.y },
-        classes: `group-${node.group}`,
-      })),
-      ...visibleEdges.map((edge) => ({
-        data: { id: edge.id, source: edge.source, target: edge.target, label: edge.label, status: edge.status },
-        classes: `kind-${edge.kind} status-${edge.status}`,
-      })),
-    ];
+    return {
+      coreNodeIds,
+      elements: [
+        ...visibleNodes.map((node) => ({
+          data: {
+            id: node.id,
+            label: node.name,
+            role: node.role,
+            group: node.group,
+            degree: degreeByNode.get(node.id) ?? 0,
+          },
+          classes: `group-${node.group}${coreNodeIds.has(node.id) ? " is-core" : ""}`,
+        })),
+        ...visibleEdges.map((edge) => ({
+          data: { id: edge.id, source: edge.source, target: edge.target, label: edge.label, status: edge.status },
+          classes: `kind-${edge.kind} status-${edge.status}`,
+        })),
+      ],
+    };
   }, [chapter, edges, nodes, visibleKinds]);
 
   useEffect(() => {
@@ -50,7 +74,23 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
     const graph = cytoscape({
       container: containerRef.current,
       elements,
-      layout: { name: "preset", fit: true, padding: 50 },
+      layout: {
+        name: "cose",
+        fit: true,
+        padding: 50,
+        animate: false,
+        randomize: true,
+        nodeRepulsion: (node) => node.hasClass("is-core") ? 900_000 : 450_000,
+        idealEdgeLength: (edge) => (
+          coreNodeIds.has(edge.source().id()) || coreNodeIds.has(edge.target().id())
+            ? 90
+            : 125
+        ),
+        edgeElasticity: 120,
+        nestingFactor: 1.15,
+        gravity: 1.2,
+        numIter: 1200,
+      },
       minZoom: 0.55,
       maxZoom: 1.8,
       boxSelectionEnabled: false,
@@ -75,6 +115,17 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
             "text-background-padding": "3px",
             "text-background-shape": "roundrectangle",
             "overlay-opacity": 0,
+          },
+        },
+        {
+          selector: "node.is-core",
+          style: {
+            width: 78,
+            height: 78,
+            "border-width": 4,
+            "border-color": "#087e6d",
+            "font-size": 13,
+            "font-weight": 700,
           },
         },
         { selector: ".group-investigator", style: { "background-color": "#d9f1ec", "border-color": "#087e6d" } },
@@ -122,11 +173,11 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
       graph.destroy();
       graphRef.current = null;
     };
-  }, [elements, onSelect]);
+  }, [coreNodeIds, elements, onSelect]);
 
   useEffect(() => {
     const graph = graphRef.current;
-    if (!graph || !graph.getElementById(selectedId).length) return;
+    if (!graph || !selectedId || !graph.getElementById(selectedId).length) return;
 
     graph.elements().removeClass("is-selected is-muted");
     const selected = graph.getElementById(selectedId);

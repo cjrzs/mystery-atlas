@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .analysis_dispatch import resume_waiting_analyses
 from .config import get_settings
 from .database import Base, engine, ensure_development_columns
 from .routers import admin, auth, feedback, imports, library, public
@@ -20,6 +21,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
         Base.metadata.create_all(bind=engine)
         ensure_development_columns()
+    resume_waiting_analyses(settings)
     yield
 
 

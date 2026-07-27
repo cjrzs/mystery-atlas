@@ -1,5 +1,5 @@
-export const API_ORIGIN = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8010";
-export const API_BASE = `${API_ORIGIN}/api/v1`;
+export const API_BASE = "/api/v1";
+export const AUTH_REQUIRED_EVENT = "mystery-atlas:auth-required";
 
 export type CurrentUser = {
   id: string;
@@ -18,6 +18,7 @@ export type BookImport = {
   progress: number;
   detected_title: string | null;
   detected_author: string | null;
+  detected_tags: string[];
   publisher: string | null;
   translator: string | null;
   isbn: string | null;
@@ -59,6 +60,7 @@ export type LibraryItem = {
   edition_id: string | null;
   title: string;
   author: string;
+  tags: string[];
   visibility: string;
   current_chapter: number;
   progress: number;
@@ -72,6 +74,12 @@ export type ReaderChapter = {
   title: string;
   text: string;
   characters: number;
+  blocks: ReaderBlock[];
+};
+
+export type ReaderBlock = {
+  type: "paragraph" | "heading" | "quote" | "divider" | "pre";
+  text: string;
 };
 
 export type ReaderBook = {
@@ -81,8 +89,69 @@ export type ReaderBook = {
   author: string;
   edition_id: string;
   edition_title: string;
+  language: string;
   visibility: string;
   chapters: ReaderChapter[];
+};
+
+export type ReaderPreferences = {
+  font_size: number;
+  line_height: number;
+  content_width: number;
+  theme: "light" | "sepia" | "dark";
+};
+
+export type GraphNode = {
+  id: string;
+  name: string;
+  role: string;
+  group: string;
+  first_chapter: number;
+  description: string;
+};
+
+export type GraphEdge = {
+  id: string;
+  source: string;
+  target: string;
+  label: string;
+  kind: string;
+  status: "confirmed" | "inferred" | "disputed";
+  first_chapter: number;
+  evidence: string;
+};
+
+export type WorkbenchAnalysis = {
+  work_id: string;
+  work_slug: string;
+  through_chapter: number;
+  status: string;
+  stage: string;
+  progress: number;
+  error: string | null;
+  graph: {
+    work_slug: string;
+    through_chapter: number;
+    nodes: GraphNode[];
+    edges: GraphEdge[];
+  };
+  timeline: {
+    chapter: number;
+    sequence: number;
+    summary: string;
+    story_time: string;
+    narrative_time: string;
+  }[];
+  chapters: { chapter: number; summary: string }[];
+  evidence: {
+    id: string;
+    title: string;
+    summary: string;
+    source_type: string;
+    status: string;
+    first_chapter: number;
+    excerpt: string;
+  }[];
 };
 
 export type ArchiveFeedback = {
@@ -129,6 +198,9 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
     const payload = await response.json().catch(() => null) as { detail?: string | { message?: string } } | null;
     const detail = payload?.detail;
     const message = typeof detail === "string" ? detail : detail?.message;
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+    }
     throw new ApiError(message ?? "请求失败，请稍后重试", response.status);
   }
 

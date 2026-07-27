@@ -47,9 +47,29 @@ if (-not (Test-LocalPort 3100)) {
 
 if (-not (Test-LocalPort 8010)) {
     $python = Join-Path $project ".venv\Scripts\python.exe"
+    $apiSource = Join-Path $project "apps\api\src"
+    $analyzerSource = Join-Path $project "workers\analyzer\src"
+    $apiArguments = @(
+        "-m",
+        "uvicorn",
+        "mystery_atlas_api.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8010"
+    )
+    if ($env:MYSTERY_ATLAS_API_RELOAD -ne "0") {
+        $apiArguments += @(
+            "--reload",
+            "--reload-dir",
+            "`"$apiSource`"",
+            "--reload-dir",
+            "`"$analyzerSource`""
+        )
+    }
     $apiProcess = Start-Process `
         -FilePath $python `
-        -ArgumentList @("-m", "uvicorn", "mystery_atlas_api.main:app", "--host", "127.0.0.1", "--port", "8010") `
+        -ArgumentList $apiArguments `
         -WorkingDirectory $project `
         -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $logs "api.log") `

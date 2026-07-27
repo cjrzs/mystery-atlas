@@ -16,8 +16,8 @@
 
 - `apps/web`：档案库、阅读工作台、账户、上传与维护界面。
 - `apps/api`：FastAPI 账户、上传解析、作品版本、阅读记录、反馈和治理 API。
-- `workers/analyzer`：分阶段 AI 分析任务骨架。
-- `infra/docker`：PostgreSQL、Redis 和 MinIO 本地基础设施。
+- `workers/analyzer`：可执行的分层整书 AI 分析、证据复核与结构化落库模块。
+- `infra/docker`：Web、API、分析 Worker、PostgreSQL、Redis 和 MinIO 的完整容器部署。
 
 ## 本地启动
 
@@ -35,7 +35,7 @@ pnpm dev:local
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e "apps/api[dev]"
+.\.venv\Scripts\python.exe -m pip install -e "workers/analyzer" -e "apps/api"
 $env:PYTHONPATH="apps/api/src"
 .\.venv\Scripts\python.exe -m uvicorn mystery_atlas_api.main:app --reload --host 127.0.0.1 --port 8010
 ```
@@ -43,3 +43,31 @@ $env:PYTHONPATH="apps/api/src"
 开发环境中的第一个注册账户会成为超级管理员。正式环境必须设置安全的 `MYSTERY_ATLAS_SESSION_SECRET`，并显式配置超级管理员。
 
 上传文件保存在 `.data/uploads`，解析记录和账户数据保存在 `.data/mystery-atlas.db`；两者均已排除在 Git 之外。
+
+## Docker 单机部署
+
+Docker Compose 会启动 Web、API、Celery 分析 Worker、PostgreSQL、Redis 和 MinIO。浏览器只需访问 Web 端口，其他服务留在容器网络中。
+
+本机直接启动：
+
+```powershell
+docker compose -f infra/docker/compose.yaml up --build -d
+```
+
+默认地址为 `http://127.0.0.1:3100`。首次启动会自动执行数据库迁移；如果项目目录中已有 `.data/mystery-atlas.db` 和 `.data/uploads`，迁移容器会使用 SQLite 一致性快照把现有账户、档案、阅读进度、AI 结果和源文件迁移到 PostgreSQL 与持久卷，并重建旧书的阅读排版。原始 `.data` 不会被删除或覆盖。
+
+部署到其他机器前，先复制并修改环境模板：
+
+```powershell
+Copy-Item .env.docker.example .env.docker
+docker compose --env-file .env.docker -f infra/docker/compose.yaml up --build -d
+```
+
+查看状态和迁移报告：
+
+```powershell
+docker compose -f infra/docker/compose.yaml ps
+docker compose -f infra/docker/compose.yaml logs migrate
+```
+
+当前 Compose 交付不包含公网域名和 HTTPS。接入服务器和反向代理后，应替换所有示例密码、使用随机会话密钥，并把 `MYSTERY_ATLAS_SESSION_COOKIE_SECURE` 设为 `true`。

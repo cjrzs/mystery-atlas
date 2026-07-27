@@ -7,6 +7,7 @@ dependencies = [
   "alembic>=1.16,<2",
   "email-validator>=2.2,<3",
   "fastapi>=0.116,<1",
+  "mystery-atlas-analyzer>=0.1.0",
   "pwdlib[argon2]>=0.3,<1",
   "pyjwt>=2.10,<3",
   "pydantic-settings>=2.10,<3",
@@ -16,6 +17,9 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
   "uvicorn[standard]>=0.35,<1",
 ]
+
+[tool.uv.sources]
+mystery-atlas-analyzer = { workspace = true }
 
 [dependency-groups]
 dev = [

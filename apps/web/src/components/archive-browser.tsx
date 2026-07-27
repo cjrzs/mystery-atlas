@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowUpRight,
   BookMarked,
@@ -15,9 +15,16 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { archiveWorks as demoWorks } from "@/lib/demo-data";
-import { apiRequest, type ArchiveWork, type LibraryItem } from "@/lib/api";
+import { ApiError, apiRequest, type ArchiveWork, type LibraryItem } from "@/lib/api";
 
 type Scope = "public" | "private";
+type PrivateLibraryState = {
+  userId: string;
+  items: LibraryItem[];
+  loading: boolean;
+  error: string;
+};
+const emptyPrivateItems: LibraryItem[] = [];
 const filters = ["全部", "本格", "密室", "叙述性诡计", "时间诡计"];
 
 const fallbackWorks: ArchiveWork[] = demoWorks.map((work) => ({
@@ -55,25 +62,111 @@ export function ArchiveBrowser({ initialScope = "public" }: { initialScope?: Sco
   const [scope, setScope] = useState<Scope>(initialScope);
   const [query, setQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState("全部");
-  const [publicWorks, setPublicWorks] = useState<ArchiveWork[]>(fallbackWorks);
-  const [privateItems, setPrivateItems] = useState<LibraryItem[]>([]);
-  const [loadError, setLoadError] = useState("");
+  const [activePrivateFilter, setActivePrivateFilter] = useState("全部");
+  const [publicWorks, setPublicWorks] = useState<ArchiveWork[]>([]);
+  const [publicLoading, setPublicLoading] = useState(true);
+  const [privateLibrary, setPrivateLibrary] = useState<PrivateLibraryState | null>(null);
+  const [publicLoadNote, setPublicLoadNote] = useState("");
+  const activePrivateLibrary = user && privateLibrary?.userId === user.id ? privateLibrary : null;
+  const privateItems = activePrivateLibrary?.items ?? emptyPrivateItems;
+  const privateLoading = Boolean(user) && (!activePrivateLibrary || activePrivateLibrary.loading);
+  const privateLoadError = activePrivateLibrary?.error ?? "";
+  const privateFilters = useMemo(
+    () => ["全部", ...new Set(privateItems.flatMap((item) => item.tags))],
+    [privateItems],
+  );
 
   useEffect(() => {
     let active = true;
     apiRequest<ArchiveWork[]>("/works")
-      .then((items) => { if (active) setPublicWorks(items); })
-      .catch(() => { if (active) setLoadError("公共档案服务暂时不可用，当前显示演示数据"); });
+      .then((items) => {
+        if (!active) return;
+        setPublicWorks(items);
+        setPublicLoading(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setPublicWorks(fallbackWorks);
+        setPublicLoadNote("公共档案服务暂时不可用，当前显示演示数据");
+        setPublicLoading(false);
+      });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const timer = window.setInterval(() => {
+      apiRequest<ArchiveWork[]>("/works")
+        .then((items) => {
+          if (!active) return;
+          setPublicWorks(items);
+          setPublicLoadNote("");
+        })
+        .catch(() => undefined);
+    }, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const retryPrivateLibrary = useCallback(async () => {
+    if (!user) return;
+    setPrivateLibrary((current) => ({
+      userId: user.id,
+      items: current?.userId === user.id ? current.items : [],
+      loading: true,
+      error: "",
+    }));
+    try {
+      const items = await apiRequest<LibraryItem[]>("/library");
+      setPrivateLibrary({ userId: user.id, items, loading: false, error: "" });
+    } catch (caught) {
+      const error = caught instanceof ApiError && caught.status === 401
+        ? ""
+        : "私人档案暂时无法读取";
+      setPrivateLibrary({ userId: user.id, items: [], loading: false, error });
+    }
+  }, [user]);
 
   useEffect(() => {
     if (!user) return;
     let active = true;
     apiRequest<LibraryItem[]>("/library")
-      .then((items) => { if (active) setPrivateItems(items); })
-      .catch(() => { if (active) setLoadError("读取私人档案失败"); });
+      .then((items) => {
+        if (active) setPrivateLibrary({ userId: user.id, items, loading: false, error: "" });
+      })
+      .catch((caught) => {
+        if (!active) return;
+        const error = caught instanceof ApiError && caught.status === 401
+          ? ""
+          : "私人档案暂时无法读取";
+        setPrivateLibrary({ userId: user.id, items: [], loading: false, error });
+      });
     return () => { active = false; };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    const timer = window.setInterval(() => {
+      apiRequest<LibraryItem[]>("/library")
+        .then((items) => {
+          if (active) {
+            setPrivateLibrary({
+              userId: user.id,
+              items,
+              loading: false,
+              error: "",
+            });
+          }
+        })
+        .catch(() => undefined);
+    }, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, [user]);
 
   const works = useMemo(() => publicWorks.filter((work) => {
@@ -83,8 +176,9 @@ export function ArchiveBrowser({ initialScope = "public" }: { initialScope?: Sco
   }), [activeFilter, publicWorks, query]);
 
   const personal = useMemo(() => privateItems.filter((item) => (
-    `${item.title}${item.author}`.toLowerCase().includes(query.toLowerCase())
-  )), [privateItems, query]);
+    `${item.title}${item.author}${item.tags.join("")}`.toLowerCase().includes(query.toLowerCase())
+      && (activePrivateFilter === "全部" || item.tags.includes(activePrivateFilter))
+  )), [activePrivateFilter, privateItems, query]);
 
   return (
     <main className="archive-page">
@@ -95,22 +189,24 @@ export function ArchiveBrowser({ initialScope = "public" }: { initialScope?: Sco
           <p className="archive-description">阅读原文，同时追踪人物、案件、关系与线索。</p>
         </div>
         <div className="archive-stats" aria-label="档案统计">
-          <div><strong>{publicWorks.length}</strong><span>公共作品</span></div>
+          <div><strong>{publicLoading ? "—" : publicWorks.length}</strong><span>公共作品</span></div>
           <div><strong>{user ? privateItems.length : "—"}</strong><span>私人记录</span></div>
-          <div><strong>{publicWorks.reduce((sum, item) => sum + item.clues, 0)}</strong><span>线索条目</span></div>
+          <div><strong>{publicLoading ? "—" : publicWorks.reduce((sum, item) => sum + item.clues, 0)}</strong><span>线索条目</span></div>
         </div>
       </section>
 
       <section className="archive-tools" aria-label="档案筛选">
-        <div className="archive-scope-tabs" role="tablist" aria-label="档案范围">
-          <button className={scope === "public" ? "active" : ""} onClick={() => setScope("public")} type="button" role="tab"><BookOpenText size={16} />公共档案</button>
-          <button className={scope === "private" ? "active" : ""} onClick={() => setScope("private")} type="button" role="tab"><BookMarked size={16} />私人档案</button>
+        <div className="archive-toolbar-row">
+          <div className="archive-scope-tabs" role="tablist" aria-label="档案范围">
+            <button className={scope === "public" ? "active" : ""} onClick={() => setScope("public")} type="button" role="tab"><BookOpenText size={16} />公共档案</button>
+            <button className={scope === "private" ? "active" : ""} onClick={() => setScope("private")} type="button" role="tab"><BookMarked size={16} />私人档案</button>
+          </div>
+          <label className="archive-search">
+            <Search size={18} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索书名、作者、人物或诡计" />
+          </label>
           {user && <Link className="secondary-command archive-upload-link" href="/library/import"><BookUp size={15} />上传书籍</Link>}
         </div>
-        <label className="archive-search">
-          <Search size={18} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索书名、作者、人物或诡计" />
-        </label>
         {scope === "public" && <div className="filter-row">
           <Filter size={16} />
           {filters.map((filter) => (
@@ -119,11 +215,21 @@ export function ArchiveBrowser({ initialScope = "public" }: { initialScope?: Sco
             </button>
           ))}
         </div>}
-        {loadError && <p className="archive-inline-note">{loadError}</p>}
+        {scope === "private" && <div className="filter-row" aria-label="私人档案筛选">
+          <Filter size={16} />
+          {privateFilters.map((filter) => (
+            <button key={filter} className={filter === activePrivateFilter ? "filter-chip active" : "filter-chip"} onClick={() => setActivePrivateFilter(filter)} type="button">
+              {filter}
+            </button>
+          ))}
+        </div>}
+        {scope === "public" && publicLoadNote && <p className="archive-inline-note">{publicLoadNote}</p>}
       </section>
 
       {scope === "public" ? (
-        <section className="archive-list" aria-label="公共作品列表">
+        publicLoading ? (
+          <div className="empty-state">正在读取公共档案…</div>
+        ) : <section className="archive-list" aria-label="公共作品列表">
           <div className="list-heading">
             <span>作品</span><span>档案规模</span><span>分析进度</span><span>维护状态</span><span aria-hidden="true" />
           </div>
@@ -156,10 +262,12 @@ export function ArchiveBrowser({ initialScope = "public" }: { initialScope?: Sco
           ))}
           {works.length === 0 && <div className="empty-state">没有找到匹配的公共档案。</div>}
         </section>
-      ) : loading ? (
+      ) : loading || privateLoading ? (
         <div className="empty-state">正在读取私人档案…</div>
       ) : !user ? (
         <section className="private-access-card"><LogIn size={24} /><h2>登录后查看私人档案</h2><p>保存阅读进度、私人批注和自己上传的书籍。</p><Link className="primary-command" href="/login"><LogIn size={15} />登录或注册</Link></section>
+      ) : privateLoadError ? (
+        <section className="private-access-card"><BookMarked size={24} /><h2>{privateLoadError}</h2><p>这不会影响公共档案，稍后可以重新尝试。</p><button className="secondary-command" onClick={() => void retryPrivateLibrary()} type="button">重新读取</button></section>
       ) : (
         <section className="archive-list private-archive-list" aria-label="私人档案列表">
           <div className="list-heading"><span>继续阅读</span><span>来源</span><span>阅读进度</span><span>状态</span><span aria-hidden="true" /></div>
@@ -172,7 +280,9 @@ export function ArchiveBrowser({ initialScope = "public" }: { initialScope?: Sco
               <ArrowUpRight className="row-arrow" size={19} />
             </Link>
           ))}
-          {personal.length === 0 && <div className="empty-state"><p>还没有私人档案。</p><Link className="secondary-command" href="/library/import"><BookUp size={15} />上传第一本书</Link></div>}
+          {personal.length === 0 && (privateItems.length > 0
+            ? <div className="empty-state"><p>没有符合当前筛选条件的私人档案。</p></div>
+            : <div className="empty-state"><p>还没有私人档案。</p><Link className="secondary-command" href="/library/import"><BookUp size={15} />上传第一本书</Link></div>)}
         </section>
       )}
     </main>

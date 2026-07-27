@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from .analysis_errors import public_analysis_error
 
 
 class RegisterRequest(BaseModel):
@@ -24,6 +26,13 @@ class UserResponse(BaseModel):
     role: Literal["user", "admin"]
 
 
+class ReaderPreferences(BaseModel):
+    font_size: int = Field(default=17, ge=14, le=22)
+    line_height: float = Field(default=1.9, ge=1.5, le=2.4)
+    content_width: int = Field(default=720, ge=520, le=900)
+    theme: Literal["light", "sepia", "dark"] = "sepia"
+
+
 class BookImportResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -36,6 +45,7 @@ class BookImportResponse(BaseModel):
     progress: int
     detected_title: str | None
     detected_author: str | None
+    detected_tags: list[str] = Field(default_factory=list)
     publisher: str | None
     translator: str | None
     isbn: str | None
@@ -70,13 +80,13 @@ class WorkSummary(BaseModel):
 
 
 class FinalizeImportRequest(BaseModel):
-    title: str = Field(min_length=1, max_length=300)
-    author: str = Field(min_length=1, max_length=200)
-    publisher: str | None = Field(default=None, max_length=200)
-    translator: str | None = Field(default=None, max_length=200)
-    isbn: str | None = Field(default=None, max_length=32)
     visibility: Literal["private", "public"]
     rights_confirmed: bool = False
+
+
+class ReaderBlock(BaseModel):
+    type: Literal["paragraph", "heading", "quote", "divider", "pre"]
+    text: str = ""
 
 
 class ReaderChapter(BaseModel):
@@ -84,6 +94,7 @@ class ReaderChapter(BaseModel):
     title: str
     text: str
     characters: int
+    blocks: list[ReaderBlock] = Field(default_factory=list)
 
 
 class ReaderResponse(BaseModel):
@@ -93,6 +104,7 @@ class ReaderResponse(BaseModel):
     author: str
     edition_id: str
     edition_title: str
+    language: str
     visibility: str
     chapters: list[ReaderChapter]
 
@@ -105,6 +117,7 @@ class LibraryItemResponse(BaseModel):
     edition_id: str | None
     title: str
     author: str
+    tags: list[str] = Field(default_factory=list)
     visibility: str
     current_chapter: int
     progress: float
@@ -191,6 +204,48 @@ class GraphSnapshot(BaseModel):
     edges: list[GraphEdge]
 
 
+class WorkbenchTimelineEvent(BaseModel):
+    chapter: int = Field(ge=1)
+    sequence: int = Field(default=1, ge=1)
+    summary: str
+    story_time: str = ""
+    narrative_time: str = ""
+
+
+class WorkbenchChapterSnapshot(BaseModel):
+    chapter: int = Field(ge=1)
+    summary: str
+
+
+class WorkbenchEvidence(BaseModel):
+    id: str
+    title: str
+    summary: str
+    source_type: str
+    status: str
+    first_chapter: int = Field(ge=1)
+    excerpt: str = ""
+
+
+class WorkbenchAnalysisResponse(BaseModel):
+    work_id: str
+    work_slug: str
+    through_chapter: int
+    status: str
+    stage: str
+    progress: int = Field(ge=0, le=100)
+    error: str | None = None
+    graph: GraphSnapshot
+    timeline: list[WorkbenchTimelineEvent]
+    chapters: list[WorkbenchChapterSnapshot]
+    evidence: list[WorkbenchEvidence]
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def hide_internal_analysis_error(cls, value: object) -> str | None:
+        return public_analysis_error(value)
+
+
 class ReviewItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -205,8 +260,9 @@ class ReviewItem(BaseModel):
 
 class AnalysisJobRequest(BaseModel):
     edition_id: str
-    tracks: list[Literal["reading", "truth"]] = Field(
-        default_factory=lambda: ["reading", "truth"]
+    tracks: list[Literal["full", "reading", "truth"]] = Field(
+        default_factory=lambda: ["full"],
+        min_length=1,
     )
 
 
@@ -214,3 +270,24 @@ class AnalysisJobResponse(BaseModel):
     job_id: str
     status: str
     stages: list[str]
+
+
+class AnalysisJobDetailResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    work_id: str
+    edition_id: str
+    track: str
+    stage: str
+    status: str
+    progress: int = Field(ge=0, le=100)
+    error: str | None
+    result_summary: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def hide_internal_analysis_error(cls, value: object) -> str | None:
+        return public_analysis_error(value)

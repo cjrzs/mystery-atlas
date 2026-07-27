@@ -1,9 +1,12 @@
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from mystery_atlas_analyzer.pipeline import ANALYSIS_STAGES
+
+from ..analysis_dispatch import schedule_analysis
 from ..database import get_session
 from ..models import AnalysisJob, Edition, Feedback, User, Work
 from ..schemas import AnalysisJobRequest, AnalysisJobResponse
@@ -14,17 +17,6 @@ router = APIRouter(
     tags=["super administration"],
     dependencies=[Depends(require_admin)],
 )
-
-ANALYSIS_STAGES = [
-    "chapter_segmentation",
-    "character_extraction",
-    "relationship_graph",
-    "cases_and_clues",
-    "dual_timeline",
-    "chapter_snapshots",
-    "truth_review",
-]
-
 
 @router.get("/dashboard")
 def dashboard(session: Session = Depends(get_session)) -> dict:
@@ -81,27 +73,30 @@ def set_edition_availability(
 def create_analysis_job(
     work_id: str,
     request: AnalysisJobRequest,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ) -> AnalysisJobResponse:
     work = session.get(Work, work_id)
     edition = session.get(Edition, request.edition_id)
     if work is None or edition is None or edition.work_id != work.id:
         raise HTTPException(status_code=404, detail="作品或版本不存在")
-    for track in request.tracks:
-        session.add(
-            AnalysisJob(
-                id=str(uuid4()),
-                work_id=work.id,
-                edition_id=edition.id,
-                track=track,
-                stage=ANALYSIS_STAGES[0],
-                status="queued",
-                progress=0,
-            )
+    jobs: list[AnalysisJob] = []
+    for track in dict.fromkeys(request.tracks):
+        job = AnalysisJob(
+            id=str(uuid4()),
+            work_id=work.id,
+            edition_id=edition.id,
+            track=track,
+            stage=ANALYSIS_STAGES[0],
+            status="queued",
+            progress=0,
         )
+        session.add(job)
+        jobs.append(job)
+        schedule_analysis(job, background_tasks)
     session.commit()
     return AnalysisJobResponse(
-        job_id=str(uuid4()),
-        status="queued",
+        job_id=jobs[0].id,
+        status=jobs[0].status,
         stages=ANALYSIS_STAGES,
     )

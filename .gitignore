@@ -1,6 +1,7 @@
 node_modules/
 .pnpm-store/
 .data/
+.test-tmp/
 .logs/
 .next/
 dist/
@@ -11,6 +12,7 @@ __pycache__/
 .ruff_cache/
 .env
 .env.local
+.env.docker
 *.pyc
 *.tsbuildinfo
 coverage/

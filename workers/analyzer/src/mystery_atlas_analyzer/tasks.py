@@ -3,44 +3,34 @@ from typing import Any
 
 from celery import Celery
 
+from .contracts import AnalysisProgress
+from .pipeline import ANALYSIS_STAGES
+from .runner import run_analysis_job
+
 
 REDIS_URL = os.getenv("MYSTERY_ATLAS_REDIS_URL", "redis://localhost:6379/0")
 app = Celery("mystery_atlas_analyzer", broker=REDIS_URL, backend=REDIS_URL)
 
-READING_STAGES = [
-    "chapter_segmentation",
-    "character_extraction",
-    "relationship_graph",
-    "cases_and_clues",
-    "dual_timeline",
-    "chapter_snapshots",
-]
-
-TRUTH_STAGES = ["full_book_reconciliation", "foreshadowing_review", "final_claims"]
+READING_STAGES = ANALYSIS_STAGES
+TRUTH_STAGES = ANALYSIS_STAGES
 
 
 @app.task(bind=True, name="analyzer.analyze_edition")
 def analyze_edition(
     task: Any,
-    edition_id: str,
-    track: str = "reading",
+    job_id: str,
 ) -> dict[str, Any]:
-    """Run the versioned pipeline; model calls will be added behind stage adapters."""
-    stages = READING_STAGES if track == "reading" else TRUTH_STAGES
-    for index, stage in enumerate(stages, start=1):
+    """Run the complete versioned whole-book analysis for one persisted job."""
+
+    def update_celery_state(progress: AnalysisProgress) -> None:
         task.update_state(
             state="PROGRESS",
             meta={
-                "edition_id": edition_id,
-                "track": track,
-                "stage": stage,
-                "progress": round(index / len(stages) * 100),
+                "job_id": job_id,
+                "stage": progress.stage,
+                "progress": progress.progress,
+                "detail": progress.detail,
             },
         )
-    return {
-        "edition_id": edition_id,
-        "track": track,
-        "status": "draft_ready",
-        "completed_stages": stages,
-    }
 
+    return run_analysis_job(job_id, on_progress=update_celery_state)

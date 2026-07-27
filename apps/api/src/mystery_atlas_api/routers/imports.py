@@ -7,6 +7,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Up
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..analysis_dispatch import schedule_analysis
+from ..book_metadata import suggest_book_metadata
 from ..config import get_settings
 from ..database import SessionLocal, get_session
 from ..models import (
@@ -20,8 +22,9 @@ from ..models import (
     utcnow,
 )
 from ..parsers import parse_book
-from ..schemas import BookImportResponse, FinalizeImportRequest
+from ..schemas import AnalysisJobDetailResponse, BookImportResponse, FinalizeImportRequest
 from ..security import get_current_user
+from ..tagging import normalize_book_tags
 
 router = APIRouter(prefix="/imports", tags=["book imports"])
 ALLOWED_FORMATS = {".epub": "epub", ".txt": "txt", ".pdf": "pdf"}
@@ -60,13 +63,20 @@ def parse_import_job(import_id: str) -> None:
                 book_import.source_format,
                 book_import.original_name,
             )
-            book_import.stage = "detecting_chapters"
+            book_import.stage = "detecting_metadata"
             book_import.progress = 80
-            book_import.detected_title = parsed.title
             book_import.chapters = parsed.chapters
             book_import.chapter_count = len(parsed.chapters)
             book_import.preview = parsed.preview
             session.commit()
+
+            metadata = suggest_book_metadata(parsed)
+            book_import.detected_title = metadata.title
+            book_import.detected_author = metadata.author
+            book_import.publisher = metadata.publisher
+            book_import.translator = metadata.translator
+            book_import.isbn = normalize_isbn(metadata.isbn)
+            book_import.detected_tags = metadata.tags
 
             book_import.status = "completed"
             book_import.stage = "awaiting_confirmation"
@@ -144,6 +154,7 @@ async def create_import(
 def finalize_import(
     import_id: str,
     request: FinalizeImportRequest,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> BookImport:
@@ -160,7 +171,9 @@ def finalize_import(
         if not request.rights_confirmed:
             raise HTTPException(status_code=422, detail="公开上传必须确认传播授权")
 
-    isbn = normalize_isbn(request.isbn)
+    title = (book_import.detected_title or Path(book_import.original_name).stem).strip()
+    author = (book_import.detected_author or "作者待识别").strip()
+    isbn = normalize_isbn(book_import.isbn)
     duplicate_conditions = [Edition.content_fingerprint == book_import.content_hash]
     if isbn:
         duplicate_conditions.append(Edition.isbn == isbn)
@@ -192,23 +205,24 @@ def finalize_import(
     work = session.scalar(
         select(Work)
         .where(Work.visibility == "public")
-        .where(func.lower(Work.title) == request.title.strip().lower())
-        .where(func.lower(Work.author) == request.author.strip().lower())
+        .where(func.lower(Work.title) == title.lower())
+        .where(func.lower(Work.author) == author.lower())
     )
     if work is None and request.visibility == "private":
         work = session.scalar(
             select(Work)
             .where(Work.visibility == "private")
             .where(Work.owner_id == user.id)
-            .where(func.lower(Work.title) == request.title.strip().lower())
-            .where(func.lower(Work.author) == request.author.strip().lower())
+            .where(func.lower(Work.title) == title.lower())
+            .where(func.lower(Work.author) == author.lower())
         )
 
     if work is None:
         work = Work(
-            slug=make_slug(request.title, session),
-            title=request.title.strip(),
-            author=request.author.strip(),
+            slug=make_slug(title, session),
+            title=title,
+            author=author,
+            tags=normalize_book_tags(book_import.detected_tags),
             status="analyzing",
             visibility=request.visibility,
             owner_id=user.id,
@@ -217,12 +231,16 @@ def finalize_import(
         )
         session.add(work)
         session.flush()
+    elif book_import.detected_tags and (
+        work.visibility == "private" or work.maintainer_id == user.id
+    ):
+        work.tags = normalize_book_tags(book_import.detected_tags)
 
     edition = Edition(
         work_id=work.id,
-        title=request.title.strip(),
-        publisher=request.publisher.strip() if request.publisher else None,
-        translator=request.translator.strip() if request.translator else None,
+        title=title,
+        publisher=book_import.publisher.strip() if book_import.publisher else None,
+        translator=book_import.translator.strip() if book_import.translator else None,
         isbn=isbn,
         source_format=book_import.source_format,
         content_fingerprint=book_import.content_hash,
@@ -235,12 +253,14 @@ def finalize_import(
     session.flush()
 
     for index, item in enumerate(book_import.chapters):
+        parsed_locator = dict(item.get("source_locator") or {})
+        parsed_locator.update({"import_id": book_import.id, "index": index})
         session.add(
             Chapter(
                 edition_id=edition.id,
                 number=int(item.get("number", index + 1)),
-                title=str(item.get("title") or f"章节 {index + 1}")[:300],
-                source_locator={"import_id": book_import.id, "index": index},
+                title=str(item.get("title") or "")[:300],
+                source_locator=parsed_locator,
             )
         )
 
@@ -253,21 +273,22 @@ def finalize_import(
         kind="public_owner" if request.visibility == "public" else "private_upload",
     )
     session.add(library_item)
-    session.add(
-        AnalysisJob(
-            work_id=work.id,
-            edition_id=edition.id,
-            track="reading",
-            stage="chapter_segmentation",
-            status="queued",
-            progress=10,
-        )
+    analysis_job = AnalysisJob(
+        work_id=work.id,
+        edition_id=edition.id,
+        track="full",
+        stage="source_validation",
+        status="queued",
+        progress=0,
     )
+    session.add(analysis_job)
+    session.flush()
+    schedule_analysis(analysis_job, background_tasks, get_settings())
 
-    book_import.detected_title = request.title.strip()
-    book_import.detected_author = request.author.strip()
-    book_import.publisher = request.publisher.strip() if request.publisher else None
-    book_import.translator = request.translator.strip() if request.translator else None
+    book_import.detected_title = title
+    book_import.detected_author = author
+    book_import.publisher = book_import.publisher.strip() if book_import.publisher else None
+    book_import.translator = book_import.translator.strip() if book_import.translator else None
     book_import.isbn = isbn
     book_import.visibility = request.visibility
     book_import.rights_confirmed = request.rights_confirmed
@@ -304,3 +325,27 @@ def get_import(
     if book_import is None or book_import.user_id != user.id:
         raise HTTPException(status_code=404, detail="导入记录不存在")
     return book_import
+
+
+@router.get(
+    "/{import_id}/analysis",
+    response_model=AnalysisJobDetailResponse,
+)
+def get_import_analysis(
+    import_id: str,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> AnalysisJob:
+    book_import = session.get(BookImport, import_id)
+    if book_import is None or book_import.user_id != user.id:
+        raise HTTPException(status_code=404, detail="导入记录不存在")
+    if book_import.edition_id is None:
+        raise HTTPException(status_code=409, detail="书籍尚未确认入库")
+    job = session.scalar(
+        select(AnalysisJob)
+        .where(AnalysisJob.edition_id == book_import.edition_id)
+        .order_by(AnalysisJob.created_at.desc())
+    )
+    if job is None:
+        raise HTTPException(status_code=404, detail="分析任务不存在")
+    return job
