@@ -18,7 +18,9 @@ x-app-environment: &app-environment
   MYSTERY_ATLAS_AI_API_KEY: ${MYSTERY_ATLAS_AI_API_KEY:-}
   MYSTERY_ATLAS_AI_READING_MODEL: ${MYSTERY_ATLAS_AI_READING_MODEL:-}
   MYSTERY_ATLAS_AI_TRUTH_MODEL: ${MYSTERY_ATLAS_AI_TRUTH_MODEL:-}
+  MYSTERY_ATLAS_AI_CONTENT_IDLE_TIMEOUT_SECONDS: ${MYSTERY_ATLAS_AI_CONTENT_IDLE_TIMEOUT_SECONDS:-180}
   MYSTERY_ATLAS_AI_MAX_CONCURRENCY: ${MYSTERY_ATLAS_AI_MAX_CONCURRENCY:-10}
+  MYSTERY_ATLAS_AI_SYNTHESIS_BATCH_CHARS: ${MYSTERY_ATLAS_AI_SYNTHESIS_BATCH_CHARS:-40000}
   MYSTERY_ATLAS_ANALYSIS_EXECUTION: celery
 
 services:
@@ -61,7 +63,7 @@ services:
 
   migrate:
     build:
-      context: ../..
+      context: .
       dockerfile: infra/docker/api.Dockerfile
     environment: *app-environment
     command:
@@ -72,7 +74,7 @@ services:
         python -m mystery_atlas_api.deployment migrate-legacy
         python -m mystery_atlas_api.reader_backfill --upload-root /data/uploads
     volumes:
-      - ../../.data:/legacy:ro
+      - ./.data:/legacy:ro
       - uploads-data:/data/uploads
     depends_on:
       postgres:
@@ -81,7 +83,7 @@ services:
 
   api:
     build:
-      context: ../..
+      context: .
       dockerfile: infra/docker/api.Dockerfile
     environment: *app-environment
     volumes:
@@ -104,7 +106,7 @@ services:
 
   worker:
     build:
-      context: ../..
+      context: .
       dockerfile: infra/docker/api.Dockerfile
     environment: *app-environment
     command:
@@ -126,7 +128,7 @@ services:
 
   web:
     build:
-      context: ../..
+      context: .
       dockerfile: infra/docker/web.Dockerfile
       args:
         MYSTERY_ATLAS_API_ORIGIN: http://api:8010

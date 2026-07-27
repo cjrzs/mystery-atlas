@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
 from .contracts import ResponseT
+
+logger = logging.getLogger(__name__)
 
 
 class ModelConfigurationError(RuntimeError):
@@ -22,12 +27,40 @@ class ModelResponseError(RuntimeError):
 
 
 class ModelOutputTruncatedError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        response_chars: int = 0,
+        finish_reason: str = "length",
+    ) -> None:
+        super().__init__(message)
+        self.response_chars = response_chars
+        self.finish_reason = finish_reason
 
 
-TASK_OUTPUT_TOKEN_LIMITS = {
-    "book_reconciliation": 8_000,
-}
+class ModelContentIdleError(TimeoutError):
+    def __init__(self, message: str, *, response_chars: int) -> None:
+        super().__init__(message)
+        self.response_chars = response_chars
+
+
+@dataclass(frozen=True)
+class StreamResult:
+    content: str
+    finish_reason: str | None
+    usage: dict[str, Any]
+    first_content_ms: int | None
+
+
+@dataclass(frozen=True)
+class AIRequestProgress:
+    call_id: str
+    task: str
+    model: str
+    attempt: int
+    response_chars: int
+    content_idle_seconds: int
 
 
 def _retry_delay(error: Exception, attempt: int) -> float:
@@ -41,14 +74,45 @@ def _retry_delay(error: Exception, attempt: int) -> float:
     return min(2 ** (attempt - 1), 4)
 
 
-def _read_stream_content(response: Any) -> str:
+def _retry_reason(error: Exception) -> str:
+    if isinstance(error, HTTPError):
+        if error.code == 429:
+            return "rate_limit"
+        if error.code >= 500:
+            return "server_error"
+        return "http_client_error"
+    if isinstance(error, ModelContentIdleError):
+        return "content_idle"
+    if isinstance(error, TimeoutError):
+        return "network_timeout"
+    if isinstance(error, URLError):
+        return "network_error"
+    if isinstance(error, ModelOutputTruncatedError):
+        return "provider_length"
+    return "invalid_response"
+
+
+def _read_stream_content(
+    response: Any,
+    *,
+    content_idle_timeout_seconds: int = 180,
+    progress_interval_seconds: int = 15,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> StreamResult:
     content_parts: list[str] = []
     event_data: list[str] = []
     completed = False
     finish_reason: str | None = None
+    usage: dict[str, Any] = {}
+    started_at = time.monotonic()
+    last_content_at = started_at
+    last_progress_at = started_at
+    first_content_at: float | None = None
+    response_chars = 0
 
-    def process_event() -> bool:
-        nonlocal finish_reason
+    def process_event(now: float) -> bool:
+        nonlocal finish_reason, usage, last_content_at, first_content_at
+        nonlocal response_chars
         if not event_data:
             return False
         data = "\n".join(event_data)
@@ -56,6 +120,9 @@ def _read_stream_content(response: Any) -> str:
         if data == "[DONE]":
             return True
         chunk = json.loads(data)
+        current_usage = chunk.get("usage")
+        if isinstance(current_usage, dict):
+            usage = current_usage
         choices = chunk.get("choices")
         if not isinstance(choices, list) or not choices:
             return False
@@ -71,12 +138,32 @@ def _read_stream_content(response: Any) -> str:
         content = delta.get("content")
         if isinstance(content, str):
             content_parts.append(content)
+            if content:
+                response_chars += len(content)
+                last_content_at = now
+                if first_content_at is None:
+                    first_content_at = now
         return False
 
     for raw_line in response:
+        now = time.monotonic()
+        if now - last_content_at > content_idle_timeout_seconds:
+            raise ModelContentIdleError(
+                "model stream produced no effective content before the idle timeout",
+                response_chars=sum(len(item) for item in content_parts),
+            )
+        if (
+            on_progress
+            and now - last_progress_at >= progress_interval_seconds
+        ):
+            on_progress(
+                response_chars,
+                round(now - last_content_at),
+            )
+            last_progress_at = now
         line = raw_line.decode("utf-8").rstrip("\r\n")
         if not line:
-            if process_event():
+            if process_event(now):
                 completed = True
                 break
             continue
@@ -87,13 +174,26 @@ def _read_stream_content(response: Any) -> str:
         elif event_data:
             event_data.append(line)
 
-    if not completed and process_event():
+    if not completed and process_event(time.monotonic()):
         completed = True
     if not completed:
         raise ValueError("model stream ended before [DONE]")
     if finish_reason == "length":
-        raise ModelOutputTruncatedError("model response was truncated by max_tokens")
-    return "".join(content_parts)
+        raise ModelOutputTruncatedError(
+            "model response was truncated by provider",
+            response_chars=sum(len(item) for item in content_parts),
+            finish_reason=finish_reason,
+        )
+    return StreamResult(
+        content="".join(content_parts),
+        finish_reason=finish_reason,
+        usage=usage,
+        first_content_ms=(
+            round((first_content_at - started_at) * 1000)
+            if first_content_at is not None
+            else None
+        ),
+    )
 
 
 def _extract_json(content: str) -> dict[str, Any]:
@@ -112,7 +212,7 @@ def _extract_json(content: str) -> dict[str, Any]:
             raise
         payload = json.loads(cleaned[start : end + 1])
     if not isinstance(payload, dict):
-        raise ValueError("model response must be a JSON object")
+        raise TypeError("model response must be a JSON object")
     return payload
 
 
@@ -120,9 +220,14 @@ def _extract_json(content: str) -> dict[str, Any]:
 class OpenAICompatibleAdapter:
     base_url: str
     api_key: str = ""
+    job_id: str = ""
+    work_id: str = ""
+    edition_id: str = ""
     timeout_seconds: int = 90
-    max_output_tokens: int = 8000
     attempts: int = 3
+    content_idle_timeout_seconds: int = 180
+    progress_interval_seconds: int = 15
+    progress_callback: Callable[[AIRequestProgress], None] | None = None
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -146,23 +251,24 @@ class OpenAICompatibleAdapter:
             raise ModelConfigurationError(f"no model configured for {task}")
 
         schema = response_model.model_json_schema()
+        schema_json = json.dumps(schema, ensure_ascii=False)
         repair_context = ""
         last_error: Exception | None = None
-        request_max_tokens = min(
-            self.max_output_tokens,
-            TASK_OUTPUT_TOKEN_LIMITS.get(task, self.max_output_tokens),
-        )
+        call_id = uuid4().hex[:12]
         for attempt in range(1, self.attempts + 1):
             normalized_model = model.casefold()
             if normalized_model.startswith("kimi-k3"):
                 generation_options: dict[str, Any] = {"reasoning_effort": "low"}
+                thinking_mode = "low"
             elif normalized_model.startswith("deepseek-v4"):
                 generation_options = {
                     "thinking": {"type": "disabled"},
                     "temperature": temperature,
                 }
+                thinking_mode = "disabled"
             else:
                 generation_options = {"temperature": temperature}
+                thinking_mode = "default"
             body = json.dumps(
                 {
                     "model": model,
@@ -172,23 +278,40 @@ class OpenAICompatibleAdapter:
                             "content": (
                                 f"{system}\nReturn one JSON object only. "
                                 f"It must satisfy this JSON Schema:\n"
-                                f"{json.dumps(schema, ensure_ascii=False)}"
+                                f"{schema_json}"
                             ),
                         },
                         {
                             "role": "user",
-                            "content": (
-                                f"<task>{task}</task>\n{prompt}{repair_context}"
-                            ),
+                            "content": (f"<task>{task}</task>\n{prompt}{repair_context}"),
                         },
                     ],
                     **generation_options,
-                    "max_tokens": request_max_tokens,
                     "response_format": {"type": "json_object"},
                     "stream": True,
                 },
                 ensure_ascii=False,
             ).encode("utf-8")
+            started_at = time.perf_counter()
+            logger.info(
+                "AI request started call_id=%s job_id=%s work_id=%s "
+                "edition_id=%s task=%s model=%s attempt=%d/%d endpoint=%s "
+                "request_bytes=%d prompt_chars=%d schema_chars=%d "
+                "max_tokens=unset thinking=%s",
+                call_id,
+                self.job_id or "unknown",
+                self.work_id or "unknown",
+                self.edition_id or "unknown",
+                task,
+                model,
+                attempt,
+                self.attempts,
+                self.endpoint,
+                len(body),
+                len(prompt),
+                len(schema_json),
+                thinking_mode,
+            )
             headers = {"Content-Type": "application/json"}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
@@ -200,9 +323,69 @@ class OpenAICompatibleAdapter:
             )
 
             try:
+                def report_stream_progress(
+                    response_chars: int,
+                    content_idle_seconds: int,
+                    request_attempt: int = attempt,
+                ) -> None:
+                    logger.info(
+                        "AI request progress call_id=%s task=%s model=%s "
+                        "attempt=%d/%d response_chars=%d content_idle_seconds=%d",
+                        call_id,
+                        task,
+                        model,
+                        request_attempt,
+                        self.attempts,
+                        response_chars,
+                        content_idle_seconds,
+                    )
+                    if self.progress_callback:
+                        self.progress_callback(
+                            AIRequestProgress(
+                                call_id=call_id,
+                                task=task,
+                                model=model,
+                                attempt=request_attempt,
+                                response_chars=response_chars,
+                                content_idle_seconds=content_idle_seconds,
+                            )
+                        )
+
                 with urlopen(request, timeout=self.timeout_seconds) as response:
-                    content = _read_stream_content(response)
-                return response_model.model_validate(_extract_json(content))
+                    stream_result = _read_stream_content(
+                        response,
+                        content_idle_timeout_seconds=(
+                            self.content_idle_timeout_seconds
+                        ),
+                        progress_interval_seconds=(
+                            self.progress_interval_seconds
+                        ),
+                        on_progress=report_stream_progress,
+                    )
+                content = stream_result.content
+                result = response_model.model_validate(_extract_json(content))
+                elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+                logger.info(
+                    "AI request completed call_id=%s task=%s model=%s "
+                    "attempt=%d/%d elapsed_ms=%d response_chars=%d "
+                    "first_content_ms=%s finish_reason=%s prompt_tokens=%s "
+                    "completion_tokens=%s total_tokens=%s",
+                    call_id,
+                    task,
+                    model,
+                    attempt,
+                    self.attempts,
+                    elapsed_ms,
+                    len(content),
+                    stream_result.first_content_ms
+                    if stream_result.first_content_ms is not None
+                    else "unknown",
+                    stream_result.finish_reason or "unknown",
+                    stream_result.usage.get("prompt_tokens", "unknown"),
+                    stream_result.usage.get("completion_tokens", "unknown"),
+                    stream_result.usage.get("total_tokens", "unknown"),
+                )
+                return result
             except (
                 HTTPError,
                 URLError,
@@ -215,16 +398,69 @@ class OpenAICompatibleAdapter:
                 ValidationError,
             ) as exc:
                 last_error = exc
-                if isinstance(exc, ModelOutputTruncatedError):
-                    request_max_tokens = min(request_max_tokens * 2, 131_072)
-                elif not isinstance(exc, (HTTPError, URLError, TimeoutError)):
+                elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+                truncated = isinstance(exc, ModelOutputTruncatedError)
+                content_idle = isinstance(exc, ModelContentIdleError)
+                adaptive_content_task = task in {
+                    "book_claim_merge",
+                    "book_claim_audit",
+                    "book_editorial",
+                }
+                if isinstance(exc, HTTPError):
+                    retry_limit = (
+                        self.attempts
+                        if exc.code == 429 or exc.code >= 500
+                        else 1
+                    )
+                elif isinstance(exc, (URLError, TimeoutError)):
+                    retry_limit = (
+                        1
+                        if content_idle and adaptive_content_task
+                        else min(self.attempts, 2)
+                        if content_idle
+                        else self.attempts
+                    )
+                else:
+                    retry_limit = min(self.attempts, 2)
+                retry_delay = (
+                    _retry_delay(exc, attempt)
+                    if (
+                        attempt < retry_limit
+                        and not truncated
+                        and not (content_idle and adaptive_content_task)
+                    )
+                    else None
+                )
+                logger.warning(
+                    "AI request failed call_id=%s task=%s model=%s "
+                    "attempt=%d/%d elapsed_ms=%d error_type=%s "
+                    "http_status=%s retry_in_seconds=%s retry_reason=%s "
+                    "response_chars=%s finish_reason=%s",
+                    call_id,
+                    task,
+                    model,
+                    attempt,
+                    self.attempts,
+                    elapsed_ms,
+                    type(exc).__name__,
+                    exc.code if isinstance(exc, HTTPError) else "none",
+                    f"{retry_delay:g}" if retry_delay is not None else "none",
+                    _retry_reason(exc),
+                    getattr(exc, "response_chars", "unknown"),
+                    getattr(exc, "finish_reason", "unknown"),
+                )
+                if truncated or (content_idle and adaptive_content_task):
+                    raise
+                if not isinstance(exc, (HTTPError, URLError, TimeoutError)):
                     repair_context = (
                         "\n\nYour previous response was invalid. "
                         "Correct it without commentary. "
                         f"Validation error: {str(exc)[:1200]}"
                     )
-                if attempt < self.attempts:
-                    time.sleep(_retry_delay(exc, attempt))
+                if retry_delay is not None:
+                    time.sleep(retry_delay)
+                else:
+                    break
 
         raise ModelResponseError(
             f"{task} failed after {self.attempts} attempts: {last_error}"

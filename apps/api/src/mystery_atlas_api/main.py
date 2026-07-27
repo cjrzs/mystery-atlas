@@ -5,11 +5,14 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .analysis_dispatch import resume_waiting_analyses
+from . import models  # noqa: F401
+from .analysis_dispatch import (
+    resume_waiting_analyses,
+    start_stale_analysis_watchdog,
+)
 from .config import get_settings
 from .database import Base, engine, ensure_development_columns
-from .routers import admin, auth, feedback, imports, library, public
-from . import models  # noqa: F401
+from .routers import admin, analysis, auth, feedback, imports, library, public
 
 settings = get_settings()
 
@@ -22,7 +25,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         Base.metadata.create_all(bind=engine)
         ensure_development_columns()
     resume_waiting_analyses(settings)
-    yield
+    stop_watchdog = start_stale_analysis_watchdog()
+    try:
+        yield
+    finally:
+        stop_watchdog()
 
 
 app = FastAPI(
@@ -41,6 +48,7 @@ app.add_middleware(
 )
 
 app.include_router(public.router, prefix="/api/v1")
+app.include_router(analysis.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(imports.router, prefix="/api/v1")
 app.include_router(library.router, prefix="/api/v1")

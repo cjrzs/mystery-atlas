@@ -229,6 +229,11 @@ class AnalysisJob(TimestampMixin, Base):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     result_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_call_id: Mapped[str | None] = mapped_column(String(36))
+    stage_detail: Mapped[str | None] = mapped_column(String(300))
+    response_chars: Mapped[int] = mapped_column(Integer, default=0)
+    content_idle_seconds: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class BookImport(TimestampMixin, Base):

@@ -13,11 +13,12 @@ class _DotenvSettings(BaseSettings):
     ai_reading_model: str = ""
     ai_truth_model: str = ""
     ai_timeout_seconds: int = 90
-    ai_max_output_tokens: int = 8000
     ai_max_chunk_chars: int = 12_000
     ai_chunk_overlap_chars: int = 500
     ai_chapters_per_batch: int = 6
     ai_max_concurrency: int = 10
+    ai_synthesis_batch_chars: int = 40_000
+    ai_content_idle_timeout_seconds: int = 180
 
     model_config = SettingsConfigDict(
         env_file=(".env", ".env.local"),
@@ -35,11 +36,12 @@ class AnalyzerSettings:
     reading_model: str
     truth_model: str
     timeout_seconds: int
-    max_output_tokens: int
     max_chunk_chars: int
     chunk_overlap_chars: int
     chapters_per_batch: int
     max_concurrency: int = 10
+    synthesis_batch_chars: int = 40_000
+    content_idle_timeout_seconds: int = 180
 
     @classmethod
     def from_env(cls) -> AnalyzerSettings:
@@ -52,11 +54,14 @@ class AnalyzerSettings:
             reading_model=dotenv.ai_reading_model,
             truth_model=dotenv.ai_truth_model,
             timeout_seconds=dotenv.ai_timeout_seconds,
-            max_output_tokens=dotenv.ai_max_output_tokens,
             max_chunk_chars=dotenv.ai_max_chunk_chars,
             chunk_overlap_chars=dotenv.ai_chunk_overlap_chars,
             chapters_per_batch=dotenv.ai_chapters_per_batch,
             max_concurrency=dotenv.ai_max_concurrency,
+            synthesis_batch_chars=dotenv.ai_synthesis_batch_chars,
+            content_idle_timeout_seconds=(
+                dotenv.ai_content_idle_timeout_seconds
+            ),
         )
 
     @property

@@ -2,18 +2,93 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 import subprocess
 import sys
-from threading import Thread
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from threading import Event, Thread
 
 from fastapi import BackgroundTasks
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
+from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
 from .models import AnalysisJob
 
 logger = logging.getLogger(__name__)
+
+
+def mark_stale_running_analyses(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: int = 300,
+) -> int:
+    current_time = now or datetime.now(UTC)
+    cutoff = current_time - timedelta(seconds=stale_after_seconds)
+    jobs = list(
+        session.scalars(
+            select(AnalysisJob).where(
+                AnalysisJob.status == "running",
+                or_(
+                    AnalysisJob.heartbeat_at < cutoff,
+                    AnalysisJob.heartbeat_at.is_(None)
+                    & (AnalysisJob.updated_at < cutoff),
+                ),
+            )
+        )
+    )
+    for job in jobs:
+        job.status = "failed"
+        job.error = "analysis worker heartbeat expired; resume from checkpoint"
+        job.stage_detail = "worker heartbeat expired"
+        job.current_call_id = None
+        job.content_idle_seconds = 0
+    return len(jobs)
+
+
+def recover_stale_running_analyses() -> int:
+    from .database import SessionLocal
+
+    with SessionLocal() as session:
+        recovered = mark_stale_running_analyses(session)
+        session.commit()
+    if recovered:
+        logger.warning(
+            "Marked %d analysis job(s) failed after heartbeat expiry",
+            recovered,
+        )
+    return recovered
+
+
+def start_stale_analysis_watchdog(
+    *,
+    interval_seconds: float = 60,
+) -> Callable[[], None]:
+    stopped = Event()
+
+    def run() -> None:
+        while not stopped.is_set():
+            try:
+                recover_stale_running_analyses()
+            except Exception:
+                logger.exception("Analysis heartbeat watchdog failed")
+            if stopped.wait(interval_seconds):
+                break
+
+    thread = Thread(
+        target=run,
+        name="analysis-heartbeat-watchdog",
+        daemon=True,
+    )
+    thread.start()
+
+    def stop() -> None:
+        stopped.set()
+        thread.join(timeout=1)
+
+    return stop
 
 
 def ai_analysis_configured(settings: Settings | None = None) -> bool:
@@ -52,8 +127,6 @@ def _claim_inline_job(job_id: str) -> bool:
             )
             .values(
                 status="running",
-                stage="source_validation",
-                progress=0,
                 error=None,
             )
         )
@@ -131,12 +204,15 @@ def schedule_analysis(
     job: AnalysisJob,
     background_tasks: BackgroundTasks,
     settings: Settings | None = None,
+    *,
+    resume: bool = False,
 ) -> str:
     current = settings or get_settings()
     if not ai_analysis_configured(current):
         job.status = "waiting_configuration"
-        job.stage = "waiting_for_ai_configuration"
-        job.progress = 0
+        if not resume:
+            job.stage = "waiting_for_ai_configuration"
+            job.progress = 0
         job.error = (
             "Configure MYSTERY_ATLAS_AI_BASE_URL and "
             "MYSTERY_ATLAS_AI_READING_MODEL"
@@ -144,8 +220,9 @@ def schedule_analysis(
         return job.status
 
     job.status = "queued"
-    job.stage = "source_validation"
-    job.progress = 0
+    if not resume:
+        job.stage = "source_validation"
+        job.progress = 0
     job.error = None
     if current.analysis_execution == "celery":
         background_tasks.add_task(_send_to_celery, job.id)
@@ -173,8 +250,6 @@ def resume_waiting_analyses(settings: Settings | None = None) -> int:
         job_ids = [job.id for job in jobs]
         for job in jobs:
             job.status = "queued"
-            job.stage = "source_validation"
-            job.progress = 0
             job.error = None
         session.commit()
 

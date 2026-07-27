@@ -24,6 +24,7 @@ from ..schemas import (
     WorkbenchAnalysisResponse,
     WorkSummary,
 )
+from ..security import get_optional_user
 
 router = APIRouter(prefix="/works", tags=["public works"])
 
@@ -144,6 +145,7 @@ def get_reader(
 def get_workbench_analysis(
     slug: str,
     through_chapter: int = Query(default=1, ge=1, le=999),
+    user: User | None = Depends(get_optional_user),
     session: Session = Depends(get_session),
 ) -> WorkbenchAnalysisResponse:
     work = session.scalar(
@@ -151,7 +153,7 @@ def get_workbench_analysis(
     )
     if work is None:
         raise HTTPException(status_code=404, detail="作品不存在")
-    return workbench_analysis(work, through_chapter, session)
+    return workbench_analysis(work, through_chapter, session, user=user)
 
 
 @router.get("/{slug}/graph", response_model=GraphSnapshot)

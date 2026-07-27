@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     ai_reading_model: str = ""
     ai_truth_model: str = ""
     ai_timeout_seconds: int = 20
-    ai_max_output_tokens: int = 8000
     ai_max_chunk_chars: int = 12000
     ai_chunk_overlap_chars: int = 500
     ai_chapters_per_batch: int = 6

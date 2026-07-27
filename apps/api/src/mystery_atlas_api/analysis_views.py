@@ -3,12 +3,20 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .analysis_retry import (
+    analysis_retry_hint,
+    can_manage_analysis,
+    can_restart_from_beginning,
+    can_retry_from_checkpoint,
+)
 from .models import (
     AnalysisJob,
     ChapterSnapshot,
+    Edition,
     Evidence,
     Person,
     PersonRelation,
+    User,
     Work,
 )
 from .schemas import (
@@ -113,6 +121,8 @@ def workbench_analysis(
     work: Work,
     through_chapter: int,
     session: Session,
+    *,
+    user: User | None = None,
 ) -> WorkbenchAnalysisResponse:
     job = session.scalar(
         select(AnalysisJob)
@@ -148,14 +158,38 @@ def workbench_analysis(
             .order_by(Evidence.first_chapter, Evidence.created_at)
         )
     )
+    edition = session.get(Edition, job.edition_id) if job else None
+    permitted = bool(
+        job
+        and edition
+        and can_manage_analysis(user, work, edition)
+    )
     return WorkbenchAnalysisResponse(
         work_id=work.id,
         work_slug=work.slug,
+        job_id=job.id if job else None,
         through_chapter=through_chapter,
         status=job.status if job else work.status,
-        stage=job.stage if job else ("completed" if work.analysis_progress == 100 else "not_started"),
+        stage=(
+            job.stage
+            if job
+            else ("completed" if work.analysis_progress == 100 else "not_started")
+        ),
         progress=job.progress if job else work.analysis_progress,
         error=job.error if job else None,
+        heartbeat_at=job.heartbeat_at if job else None,
+        current_call_id=job.current_call_id if job else None,
+        stage_detail=job.stage_detail if job else None,
+        response_chars=job.response_chars if job else 0,
+        content_idle_seconds=job.content_idle_seconds if job else 0,
+        can_manage_retry=permitted,
+        can_retry=bool(job and permitted and can_retry_from_checkpoint(job)),
+        can_restart=bool(job and permitted and can_restart_from_beginning(job)),
+        retry_hint=analysis_retry_hint(
+            job,
+            user=user,
+            permitted=permitted,
+        ),
         graph=graph_for_work(work, through_chapter, session),
         timeline=timeline,
         chapters=[

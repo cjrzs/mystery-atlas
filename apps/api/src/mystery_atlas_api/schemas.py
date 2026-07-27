@@ -230,11 +230,21 @@ class WorkbenchEvidence(BaseModel):
 class WorkbenchAnalysisResponse(BaseModel):
     work_id: str
     work_slug: str
+    job_id: str | None = None
     through_chapter: int
     status: str
     stage: str
     progress: int = Field(ge=0, le=100)
     error: str | None = None
+    heartbeat_at: datetime | None = None
+    current_call_id: str | None = None
+    stage_detail: str | None = None
+    response_chars: int = 0
+    content_idle_seconds: int = 0
+    can_manage_retry: bool = False
+    can_retry: bool = False
+    can_restart: bool = False
+    retry_hint: str = ""
     graph: GraphSnapshot
     timeline: list[WorkbenchTimelineEvent]
     chapters: list[WorkbenchChapterSnapshot]
@@ -284,6 +294,11 @@ class AnalysisJobDetailResponse(BaseModel):
     progress: int = Field(ge=0, le=100)
     error: str | None
     result_summary: dict = Field(default_factory=dict)
+    heartbeat_at: datetime | None = None
+    current_call_id: str | None = None
+    stage_detail: str | None = None
+    response_chars: int = 0
+    content_idle_seconds: int = 0
     created_at: datetime
     updated_at: datetime
 

@@ -3,8 +3,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..analysis_dispatch import schedule_analysis
+from ..analysis_retry import can_manage_analysis, can_retry_from_checkpoint
 from ..analysis_views import workbench_analysis
-from ..config import Settings
+from ..config import get_settings
 from ..database import get_session
 from ..demo import WORKS
 from ..models import AnalysisJob, BookImport, Edition, PrivateLibraryBook, User, Work
@@ -154,7 +155,7 @@ def get_private_analysis(
     work = session.get(Work, item.work_id) if item.work_id else None
     if work is None:
         raise HTTPException(status_code=404, detail="作品不存在")
-    return workbench_analysis(work, through_chapter, session)
+    return workbench_analysis(work, through_chapter, session, user=user)
 
 
 @router.post(
@@ -177,10 +178,30 @@ def retry_private_analysis(
     )
     if job is None:
         raise HTTPException(status_code=404, detail="分析任务不存在")
-    if job.status not in {"queued", "running", "completed"}:
-        schedule_analysis(job, background_tasks, Settings())
-        session.commit()
-        session.refresh(job)
+    work = session.get(Work, job.work_id)
+    edition = session.get(Edition, job.edition_id)
+    if work is None or edition is None:
+        raise HTTPException(status_code=404, detail="作品或版本不存在")
+    if not can_manage_analysis(user, work, edition):
+        raise HTTPException(
+            status_code=403,
+            detail="只有作品所有者、维护者或管理员可以重试分析",
+        )
+    if job.status not in {"failed", "waiting_configuration"}:
+        raise HTTPException(status_code=409, detail="该分析任务当前不可重试")
+    if not can_retry_from_checkpoint(job):
+        raise HTTPException(
+            status_code=409,
+            detail="该任务没有可用的阶段检查点，无法在不重跑前置阶段的情况下恢复",
+        )
+    schedule_analysis(
+        job,
+        background_tasks,
+        get_settings(),
+        resume=True,
+    )
+    session.commit()
+    session.refresh(job)
     return job
 
 

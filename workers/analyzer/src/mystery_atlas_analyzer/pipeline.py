@@ -1,20 +1,31 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
+import logging
 import re
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel
 
 from .contracts import (
+    AnalysisCheckpoint,
     AnalysisProgress,
     BookAnalysis,
+    BookEditorial,
     BookInput,
+    BookInterpretationEditorial,
+    BookMysteryEditorial,
+    BookStructureEditorial,
     BookSynthesis,
     ChapterAnalysis,
+    CheckpointCallback,
+    ClaimAuditResult,
+    ClaimFinding,
+    ClaimMergeResult,
     EvidenceAudit,
     EvidenceFinding,
     ModelAdapter,
@@ -24,7 +35,9 @@ from .contracts import (
     SourceChapter,
     SourceCitation,
 )
+from .model_adapters import ModelContentIdleError, ModelOutputTruncatedError
 
+logger = logging.getLogger(__name__)
 
 ANALYSIS_STAGES = [
     "source_validation",
@@ -45,6 +58,7 @@ class PipelineConfig:
     chunk_overlap_chars: int = 500
     chapters_per_batch: int = 6
     max_concurrency: int = 1
+    synthesis_batch_chars: int = 40_000
 
     @property
     def reconciliation_model(self) -> str:
@@ -260,6 +274,438 @@ def _all_citations(value: Any) -> list[SourceCitation]:
             citations.extend(_all_citations(item))
         return citations
     return []
+
+
+def _citation_key(
+    citation: SourceCitation,
+) -> tuple[int, int | None, int | None, str]:
+    return (
+        citation.chapter,
+        citation.start_char,
+        citation.end_char,
+        "".join(citation.excerpt.split()).casefold(),
+    )
+
+
+def _citation_id(citation: SourceCitation) -> str:
+    raw = "|".join(
+        [
+            str(citation.chapter),
+            str(citation.start_char),
+            str(citation.end_char),
+            "".join(citation.excerpt.split()).casefold(),
+        ]
+    )
+    return f"ev-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _verified_citation_catalog(value: Any) -> dict[str, SourceCitation]:
+    catalog: dict[str, SourceCitation] = {}
+    for citation in _all_citations(value):
+        if citation.verified:
+            catalog.setdefault(_citation_id(citation), citation)
+    return catalog
+
+
+def _claim_candidates(
+    parts: list[PartSynthesis],
+    catalog: dict[str, SourceCitation],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for part_index, part in enumerate(parts, start=1):
+        for claim_index, claim in enumerate(part.claims, start=1):
+            evidence_ids = [
+                evidence_id
+                for citation in claim.citations
+                if citation.verified
+                for evidence_id in [_citation_id(citation)]
+                if evidence_id in catalog
+            ]
+            evidence_ids = list(dict.fromkeys(evidence_ids))
+            if not evidence_ids:
+                continue
+            raw_id = (
+                f"{part_index}|{claim_index}|{claim.introduced_chapter}|"
+                f"{claim.kind}|{claim.statement}"
+            )
+            claim_id = f"cl-{hashlib.sha256(raw_id.encode('utf-8')).hexdigest()[:16]}"
+            candidates.append(
+                {
+                    "claim_id": claim_id,
+                    "statement": claim.statement,
+                    "kind": claim.kind,
+                    "status": claim.status,
+                    "confidence": claim.confidence,
+                    "introduced_chapter": claim.introduced_chapter,
+                    "resolved_chapter": claim.resolved_chapter,
+                    "reasoning": claim.reasoning,
+                    "source_claim_ids": [claim_id],
+                    "evidence_ids": evidence_ids,
+                }
+            )
+    return candidates
+
+
+def _claims_to_candidates(
+    claims: list[ClaimFinding],
+    catalog: dict[str, SourceCitation],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for claim in claims:
+        raw_id = (
+            f"{claim.introduced_chapter}|{claim.resolved_chapter}|"
+            f"{claim.kind}|{claim.statement}"
+        )
+        claim_id = f"cl-{hashlib.sha256(raw_id.encode('utf-8')).hexdigest()[:16]}"
+        candidates.append(
+            {
+                "claim_id": claim_id,
+                "statement": claim.statement,
+                "kind": claim.kind,
+                "status": claim.status,
+                "confidence": claim.confidence,
+                "introduced_chapter": claim.introduced_chapter,
+                "resolved_chapter": claim.resolved_chapter,
+                "reasoning": claim.reasoning,
+                "source_claim_ids": [claim_id],
+                "evidence_ids": list(
+                    dict.fromkeys(
+                        evidence_id
+                        for citation in claim.citations
+                        if citation.verified
+                        for evidence_id in [_citation_id(citation)]
+                        if evidence_id in catalog
+                    )
+                ),
+            }
+        )
+    return candidates
+
+
+def _claim_from_candidate(
+    candidate: dict[str, Any],
+    catalog: dict[str, SourceCitation],
+) -> ClaimFinding:
+    return ClaimFinding(
+        statement=candidate["statement"],
+        kind=candidate["kind"],
+        status=candidate["status"],
+        confidence=candidate["confidence"],
+        introduced_chapter=candidate["introduced_chapter"],
+        resolved_chapter=candidate["resolved_chapter"],
+        reasoning=candidate["reasoning"],
+        citations=[
+            catalog[evidence_id]
+            for evidence_id in candidate["evidence_ids"]
+            if evidence_id in catalog
+        ],
+    )
+
+
+def _apply_claim_merge(
+    result: ClaimMergeResult,
+    candidates: list[dict[str, Any]],
+    catalog: dict[str, SourceCitation],
+) -> list[ClaimFinding]:
+    candidates_by_id = {item["claim_id"]: item for item in candidates}
+    consumed: set[str] = set()
+    claims: list[ClaimFinding] = []
+    for decision in result.claims:
+        source_ids = [
+            claim_id
+            for claim_id in dict.fromkeys(decision.source_claim_ids)
+            if claim_id in candidates_by_id and claim_id not in consumed
+        ]
+        if not source_ids:
+            continue
+        evidence_ids = list(
+            dict.fromkeys(
+                evidence_id
+                for claim_id in source_ids
+                for evidence_id in candidates_by_id[claim_id]["evidence_ids"]
+            )
+        )
+        claims.append(
+            ClaimFinding(
+                statement=decision.statement,
+                kind=decision.kind,
+                status=decision.status,
+                confidence=decision.confidence,
+                introduced_chapter=decision.introduced_chapter,
+                resolved_chapter=decision.resolved_chapter,
+                reasoning=decision.reasoning,
+                citations=[
+                    catalog[evidence_id]
+                    for evidence_id in evidence_ids
+                    if evidence_id in catalog
+                ],
+            )
+        )
+        consumed.update(source_ids)
+    claims.extend(
+        _claim_from_candidate(candidate, catalog)
+        for candidate in candidates
+        if candidate["claim_id"] not in consumed
+    )
+    return claims
+
+
+def _claim_batch_key(candidates: list[dict[str, Any]]) -> str:
+    raw = "|".join(item["claim_id"] for item in candidates)
+    return f"claim-batch-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _claim_merge_prompt(
+    candidates: list[dict[str, Any]],
+    catalog: dict[str, SourceCitation],
+) -> str:
+    evidence_ids = {
+        evidence_id
+        for candidate in candidates
+        for evidence_id in candidate["evidence_ids"]
+    }
+    evidence = [
+        {
+            "evidence_id": evidence_id,
+            "chapter": citation.chapter,
+            "excerpt": citation.excerpt,
+        }
+        for evidence_id, citation in catalog.items()
+        if evidence_id in evidence_ids
+    ]
+    return (
+        "Merge only semantically equivalent claims. Preserve conflicting claims "
+        "separately. Every output claim must list the input claim IDs it represents. "
+        "Do not invent claim IDs or evidence.\n\n"
+        + json.dumps(
+            {
+                "claims": candidates,
+                "evidence": evidence,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def _claim_leaf_batches(
+    candidates: list[dict[str, Any]],
+    catalog: dict[str, SourceCitation],
+    max_batch_chars: int,
+) -> list[list[dict[str, Any]]]:
+    if (
+        len(candidates) <= 1
+        or len(_claim_merge_prompt(candidates, catalog)) <= max_batch_chars
+    ):
+        return [candidates]
+    middle = len(candidates) // 2
+    return [
+        *_claim_leaf_batches(candidates[:middle], catalog, max_batch_chars),
+        *_claim_leaf_batches(candidates[middle:], catalog, max_batch_chars),
+    ]
+
+
+def _combine_claim_merge_outputs(
+    results: list[tuple[list[ClaimFinding], list[str], list[str]]],
+) -> tuple[list[ClaimFinding], list[str], list[str]]:
+    return (
+        [claim for result in results for claim in result[0]],
+        list(dict.fromkeys(item for result in results for item in result[1])),
+        list(dict.fromkeys(item for result in results for item in result[2])),
+    )
+
+
+def _merge_claims_adaptively(
+    adapter: ModelAdapter,
+    *,
+    model: str,
+    candidates: list[dict[str, Any]],
+    catalog: dict[str, SourceCitation],
+    cached_batches: dict[str, ClaimMergeResult],
+    on_batch: Callable[[str, ClaimMergeResult], None] | None = None,
+    max_batch_chars: int = 40_000,
+    max_concurrency: int = 1,
+    layer: int = 0,
+    parent_batch_id: str | None = None,
+) -> tuple[list[ClaimFinding], list[str], list[str]]:
+    if not candidates:
+        return [], [], []
+    batch_key = _claim_batch_key(candidates)
+    prompt = _claim_merge_prompt(candidates, catalog)
+    if len(candidates) > 1 and len(prompt) > max_batch_chars:
+        batches = _claim_leaf_batches(candidates, catalog, max_batch_chars)
+        logger.info(
+            "AI batch split task=book_claim_merge batch_id=%s "
+            "parent_batch_id=%s layer=%d reason=request_chars items=%d "
+            "request_chars=%d child_count=%d",
+            batch_key,
+            parent_batch_id or "none",
+            layer,
+            len(candidates),
+            len(prompt),
+            len(batches),
+        )
+
+        def merge_batch(
+            batch: list[dict[str, Any]],
+        ) -> tuple[list[ClaimFinding], list[str], list[str]]:
+            return _merge_claims_adaptively(
+                adapter,
+                model=model,
+                candidates=batch,
+                catalog=catalog,
+                cached_batches=cached_batches,
+                on_batch=on_batch,
+                max_batch_chars=max_batch_chars,
+                max_concurrency=1,
+                layer=layer + 1,
+                parent_batch_id=batch_key,
+            )
+
+        if max_concurrency > 1 and len(batches) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(max_concurrency, len(batches)),
+                thread_name_prefix="analysis-claim",
+            ) as executor:
+                combined = _combine_claim_merge_outputs(
+                    list(executor.map(merge_batch, batches))
+                )
+        else:
+            combined = _combine_claim_merge_outputs(
+                [merge_batch(batch) for batch in batches]
+            )
+        if 1 < len(combined[0]) < len(candidates):
+            next_level = _merge_claims_adaptively(
+                adapter,
+                model=model,
+                candidates=_claims_to_candidates(combined[0], catalog),
+                catalog=catalog,
+                cached_batches=cached_batches,
+                on_batch=on_batch,
+                max_batch_chars=max_batch_chars,
+                max_concurrency=max_concurrency,
+                layer=layer + 1,
+                parent_batch_id=batch_key,
+            )
+            return (
+                next_level[0],
+                list(dict.fromkeys([*combined[1], *next_level[1]])),
+                list(dict.fromkeys([*combined[2], *next_level[2]])),
+            )
+        return combined
+    result = cached_batches.get(batch_key)
+    if result is None:
+        logger.info(
+            "AI batch dispatch task=book_claim_merge batch_id=%s "
+            "parent_batch_id=%s layer=%d items=%d request_chars=%d",
+            batch_key,
+            parent_batch_id or "none",
+            layer,
+            len(candidates),
+            len(prompt),
+        )
+        try:
+            result = adapter.generate(
+                task="book_claim_merge",
+                system="You merge evidence-grounded whole-book claims.",
+                prompt=prompt,
+                response_model=ClaimMergeResult,
+                model=model,
+            )
+        except (ModelOutputTruncatedError, ModelContentIdleError) as exc:
+            logger.info(
+                "AI batch split task=book_claim_merge batch_id=%s "
+                "parent_batch_id=%s layer=%d reason=%s items=%d "
+                "request_chars=%d response_chars=%s",
+                batch_key,
+                parent_batch_id or "none",
+                layer,
+                "content_idle"
+                if isinstance(exc, ModelContentIdleError)
+                else "provider_length",
+                len(candidates),
+                len(prompt),
+                getattr(exc, "response_chars", "unknown"),
+            )
+            if len(candidates) <= 1:
+                if isinstance(exc, ModelContentIdleError):
+                    result = adapter.generate(
+                        task="book_claim_merge",
+                        system="You merge evidence-grounded whole-book claims.",
+                        prompt=prompt,
+                        response_model=ClaimMergeResult,
+                        model=model,
+                    )
+                else:
+                    raise
+            else:
+                middle = len(candidates) // 2
+                left = _merge_claims_adaptively(
+                    adapter,
+                    model=model,
+                    candidates=candidates[:middle],
+                    catalog=catalog,
+                    cached_batches=cached_batches,
+                    on_batch=on_batch,
+                    max_batch_chars=max_batch_chars,
+                    max_concurrency=max_concurrency,
+                    layer=layer + 1,
+                    parent_batch_id=batch_key,
+                )
+                right = _merge_claims_adaptively(
+                    adapter,
+                    model=model,
+                    candidates=candidates[middle:],
+                    catalog=catalog,
+                    cached_batches=cached_batches,
+                    on_batch=on_batch,
+                    max_batch_chars=max_batch_chars,
+                    max_concurrency=max_concurrency,
+                    layer=layer + 1,
+                    parent_batch_id=batch_key,
+                )
+                return (
+                    [*left[0], *right[0]],
+                    [*left[1], *right[1]],
+                    [*left[2], *right[2]],
+                )
+        if on_batch:
+            on_batch(batch_key, result)
+    return (
+        _apply_claim_merge(result, candidates, catalog),
+        result.contradictions,
+        result.uncertainties,
+    )
+
+
+def _merge_verified_timeline(parts: list[PartSynthesis]) -> list[Any]:
+    merged: dict[tuple[int, str], Any] = {}
+    for part in parts:
+        for event in part.timeline:
+            citations = [item for item in event.citations if item.verified]
+            if not citations:
+                continue
+            key = (
+                event.chapter,
+                " ".join(event.summary.split()).casefold(),
+            )
+            current = merged.get(key)
+            if current is None:
+                merged[key] = event.model_copy(update={"citations": citations})
+                continue
+            citation_map = {
+                _citation_key(item): item
+                for item in [*current.citations, *citations]
+            }
+            merged[key] = current.model_copy(
+                update={
+                    "sequence": min(current.sequence, event.sequence),
+                    "citations": list(citation_map.values()),
+                }
+            )
+    return sorted(
+        merged.values(),
+        key=lambda item: (item.chapter, item.sequence, item.summary.casefold()),
+    )
 
 
 def _evidence_id(item: EvidenceFinding) -> str:
@@ -509,16 +955,398 @@ def _analyze_source_chapter(
     return _synthesize_chapter(adapter, config, chapter, segments)
 
 
-def _book_synthesis_prompt(book: BookInput, parts: list[PartSynthesis]) -> str:
+def _compact_editorial_part(part: PartSynthesis) -> dict[str, Any]:
+    return {
+        "chapter_numbers": part.chapter_numbers,
+        "summary": part.summary,
+        "core_ideas": part.core_ideas,
+        "themes": part.themes,
+        "character_arcs": part.character_arcs,
+        "mysteries": part.mysteries,
+        "contradictions": part.contradictions,
+        "foreshadowing": part.foreshadowing,
+        "uncertainties": part.uncertainties,
+    }
+
+
+def _editorial_prompt(
+    book: BookInput,
+    parts: list[PartSynthesis],
+    timeline: list[Any],
+    claims: list[ClaimFinding],
+) -> str:
     return (
-        "Produce the whole-book synthesis from the ordered part syntheses. Explain "
+        "Produce the reader-facing whole-book editorial synthesis. Explain "
         "the book's structure, central ideas, themes, character arcs, timeline, "
         "mysteries, contradictions, foreshadowing, and practical implications. "
         "Keep author-explicit claims separate from analysis inferences. Do not invent "
-        "citations or facts.\n\n"
+        "new facts. Timeline and claims are authoritative inputs and must not be "
+        "rewritten or returned.\n\n"
         f"Book: {book.title}\nAuthor: {book.author}\n"
-        f"{json.dumps([item.model_dump(mode='json') for item in parts], ensure_ascii=False)}"
+        + json.dumps(
+            {
+                "parts": [_compact_editorial_part(item) for item in parts],
+                "timeline_index": [
+                    {
+                        "chapter": item.chapter,
+                        "sequence": item.sequence,
+                        "summary": item.summary,
+                    }
+                    for item in timeline
+                ],
+                "claims": [
+                    {
+                        "statement": item.statement,
+                        "kind": item.kind,
+                        "status": item.status,
+                        "introduced_chapter": item.introduced_chapter,
+                        "resolved_chapter": item.resolved_chapter,
+                    }
+                    for item in claims
+                ],
+            },
+            ensure_ascii=False,
+        )
     )
+
+
+def _generate_editorial_adaptively(
+    adapter: ModelAdapter,
+    *,
+    model: str,
+    prompt: str,
+    split_mode: bool,
+    cached_sections: dict[str, BaseModel],
+    on_split: Callable[[], None] | None = None,
+    on_section: Callable[[str, BaseModel], None] | None = None,
+) -> BookEditorial:
+    if not split_mode:
+        try:
+            return adapter.generate(
+                task="book_editorial",
+                system=(
+                    "You write a whole-book analysis from an authoritative fact index."
+                ),
+                prompt=prompt,
+                response_model=BookEditorial,
+                model=model,
+            )
+        except (ModelOutputTruncatedError, ModelContentIdleError):
+            split_mode = True
+            if on_split:
+                on_split()
+
+    section_specs: list[tuple[str, str, type[BaseModel], str]] = [
+        (
+            "structure",
+            "book_editorial_structure",
+            BookStructureEditorial,
+            "Return only the overview and structural sections.",
+        ),
+        (
+            "interpretation",
+            "book_editorial_interpretation",
+            BookInterpretationEditorial,
+            "Return only core ideas, themes, character arcs, and action insights.",
+        ),
+        (
+            "mysteries",
+            "book_editorial_mysteries",
+            BookMysteryEditorial,
+            "Return only mysteries, contradictions, foreshadowing, and uncertainties.",
+        ),
+    ]
+    resolved: dict[str, BaseModel] = {}
+    for key, task, response_model, instruction in section_specs:
+        result = cached_sections.get(key)
+        if result is None:
+            result = adapter.generate(
+                task=task,
+                system="You write one bounded section of a whole-book analysis.",
+                prompt=f"{instruction}\n\n{prompt}",
+                response_model=response_model,
+                model=model,
+            )
+            if on_section:
+                on_section(key, result)
+        resolved[key] = result
+
+    structure = BookStructureEditorial.model_validate(resolved["structure"])
+    interpretation = BookInterpretationEditorial.model_validate(
+        resolved["interpretation"]
+    )
+    mysteries = BookMysteryEditorial.model_validate(resolved["mysteries"])
+    return BookEditorial(
+        **structure.model_dump(mode="python"),
+        **interpretation.model_dump(mode="python"),
+        **mysteries.model_dump(mode="python"),
+    )
+
+
+def _book_claim_id(claim: ClaimFinding) -> str:
+    raw = (
+        f"{claim.introduced_chapter}|{claim.resolved_chapter}|"
+        f"{claim.kind}|{claim.statement}"
+    )
+    return f"book-cl-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _claim_audit_payload(
+    claims: list[ClaimFinding],
+    catalog: dict[str, SourceCitation],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    claim_payload: list[dict[str, Any]] = []
+    used_evidence_ids: set[str] = set()
+    for claim in claims:
+        evidence_ids = [
+            evidence_id
+            for citation in claim.citations
+            if citation.verified
+            for evidence_id in [_citation_id(citation)]
+            if evidence_id in catalog
+        ]
+        evidence_ids = list(dict.fromkeys(evidence_ids))
+        used_evidence_ids.update(evidence_ids)
+        claim_payload.append(
+            {
+                "claim_id": _book_claim_id(claim),
+                "statement": claim.statement,
+                "kind": claim.kind,
+                "status": claim.status,
+                "confidence": claim.confidence,
+                "introduced_chapter": claim.introduced_chapter,
+                "resolved_chapter": claim.resolved_chapter,
+                "reasoning": claim.reasoning,
+                "evidence_ids": evidence_ids,
+            }
+        )
+    evidence_payload = [
+        {
+            "evidence_id": evidence_id,
+            "chapter": citation.chapter,
+            "excerpt": citation.excerpt,
+        }
+        for evidence_id, citation in catalog.items()
+        if evidence_id in used_evidence_ids
+    ]
+    return claim_payload, evidence_payload
+
+
+def _claim_audit_prompt(
+    claims: list[ClaimFinding],
+    catalog: dict[str, SourceCitation],
+) -> str:
+    claim_payload, evidence_payload = _claim_audit_payload(claims, catalog)
+    return (
+        "Audit each claim only against its listed verified evidence IDs. Return one "
+        "decision for every claim_id. Unsupported claims must not be treated as "
+        "facts. Never invent claim IDs or evidence.\n\n"
+        + json.dumps(
+            {
+                "claims": claim_payload,
+                "evidence": evidence_payload,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def _apply_claim_audit(
+    claims: list[ClaimFinding],
+    audit: ClaimAuditResult,
+) -> ReconciliationResult:
+    decisions = {item.claim_id: item for item in audit.decisions}
+    final_claims: list[ClaimFinding] = []
+    unsupported: list[str] = []
+    uncertainties = list(audit.uncertainties)
+    for claim in claims:
+        decision = decisions.get(_book_claim_id(claim))
+        if decision is not None and decision.verdict == "unsupported":
+            unsupported.append(claim.statement)
+            continue
+        if decision is None or decision.verdict == "uncertain":
+            final_claims.append(claim.model_copy(update={"status": "uncertain"}))
+            if claim.statement not in uncertainties:
+                uncertainties.append(claim.statement)
+            continue
+        final_claims.append(claim)
+    return ReconciliationResult(
+        final_claims=final_claims,
+        contradictions=audit.contradictions,
+        unsupported_claims=unsupported,
+        uncertainties=uncertainties,
+        review_notes=audit.review_notes,
+    )
+
+
+def _claim_audit_batch_key(claims: list[ClaimFinding]) -> str:
+    raw = "|".join(_book_claim_id(claim) for claim in claims)
+    return f"claim-audit-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _combine_reconciliations(
+    left: ReconciliationResult,
+    right: ReconciliationResult,
+) -> ReconciliationResult:
+    return ReconciliationResult(
+        final_claims=[*left.final_claims, *right.final_claims],
+        contradictions=list(
+            dict.fromkeys([*left.contradictions, *right.contradictions])
+        ),
+        unsupported_claims=list(
+            dict.fromkeys(
+                [*left.unsupported_claims, *right.unsupported_claims]
+            )
+        ),
+        uncertainties=list(
+            dict.fromkeys([*left.uncertainties, *right.uncertainties])
+        ),
+        review_notes=[*left.review_notes, *right.review_notes],
+    )
+
+
+def _claim_audit_leaf_batches(
+    claims: list[ClaimFinding],
+    catalog: dict[str, SourceCitation],
+    max_batch_chars: int,
+) -> list[list[ClaimFinding]]:
+    if (
+        len(claims) <= 1
+        or len(_claim_audit_prompt(claims, catalog)) <= max_batch_chars
+    ):
+        return [claims]
+    middle = len(claims) // 2
+    return [
+        *_claim_audit_leaf_batches(
+            claims[:middle],
+            catalog,
+            max_batch_chars,
+        ),
+        *_claim_audit_leaf_batches(
+            claims[middle:],
+            catalog,
+            max_batch_chars,
+        ),
+    ]
+
+
+def _audit_claims_adaptively(
+    adapter: ModelAdapter,
+    *,
+    model: str,
+    claims: list[ClaimFinding],
+    catalog: dict[str, SourceCitation],
+    cached_batches: dict[str, ClaimAuditResult],
+    on_batch: Callable[[str, ClaimAuditResult], None] | None = None,
+    max_batch_chars: int = 40_000,
+    max_concurrency: int = 1,
+) -> ReconciliationResult:
+    if not claims:
+        return ReconciliationResult()
+    prompt = _claim_audit_prompt(claims, catalog)
+    if len(claims) > 1 and len(prompt) > max_batch_chars:
+        batches = _claim_audit_leaf_batches(
+            claims,
+            catalog,
+            max_batch_chars,
+        )
+
+        def audit_batch(batch: list[ClaimFinding]) -> ReconciliationResult:
+            return _audit_claims_adaptively(
+                adapter,
+                model=model,
+                claims=batch,
+                catalog=catalog,
+                cached_batches=cached_batches,
+                on_batch=on_batch,
+                max_batch_chars=max_batch_chars,
+                max_concurrency=1,
+            )
+
+        if max_concurrency > 1 and len(batches) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(max_concurrency, len(batches)),
+                thread_name_prefix="analysis-audit",
+            ) as executor:
+                results = list(executor.map(audit_batch, batches))
+        else:
+            results = [audit_batch(batch) for batch in batches]
+        combined = ReconciliationResult()
+        for result in results:
+            combined = _combine_reconciliations(combined, result)
+        return combined
+
+    batch_key = _claim_audit_batch_key(claims)
+    audit = cached_batches.get(batch_key)
+    if audit is None:
+        def generate_audit() -> ClaimAuditResult:
+            return adapter.generate(
+                task="book_claim_audit",
+                system="You are the final evidence auditor for whole-book claims.",
+                prompt=prompt,
+                response_model=ClaimAuditResult,
+                model=model,
+                temperature=0,
+            )
+
+        try:
+            audit = generate_audit()
+        except ModelContentIdleError:
+            if len(claims) <= 1:
+                audit = generate_audit()
+            else:
+                middle = len(claims) // 2
+                return _combine_reconciliations(
+                    _audit_claims_adaptively(
+                        adapter,
+                        model=model,
+                        claims=claims[:middle],
+                        catalog=catalog,
+                        cached_batches=cached_batches,
+                        on_batch=on_batch,
+                        max_batch_chars=max_batch_chars,
+                        max_concurrency=1,
+                    ),
+                    _audit_claims_adaptively(
+                        adapter,
+                        model=model,
+                        claims=claims[middle:],
+                        catalog=catalog,
+                        cached_batches=cached_batches,
+                        on_batch=on_batch,
+                        max_batch_chars=max_batch_chars,
+                        max_concurrency=1,
+                    ),
+                )
+        except ModelOutputTruncatedError:
+            if len(claims) <= 1:
+                raise
+            middle = len(claims) // 2
+            return _combine_reconciliations(
+                _audit_claims_adaptively(
+                    adapter,
+                    model=model,
+                    claims=claims[:middle],
+                    catalog=catalog,
+                    cached_batches=cached_batches,
+                    on_batch=on_batch,
+                    max_batch_chars=max_batch_chars,
+                    max_concurrency=1,
+                ),
+                _audit_claims_adaptively(
+                    adapter,
+                    model=model,
+                    claims=claims[middle:],
+                    catalog=catalog,
+                    cached_batches=cached_batches,
+                    on_batch=on_batch,
+                    max_batch_chars=max_batch_chars,
+                    max_concurrency=1,
+                ),
+            )
+        if on_batch:
+            on_batch(batch_key, audit)
+    return _apply_claim_audit(claims, audit)
 
 
 def _reconciliation_prompt(
@@ -541,7 +1369,9 @@ def _reconciliation_prompt(
         "remaining uncertainties, and review notes. A claim without verified support "
         "must be marked uncertain or listed as unsupported. Never treat an inference "
         "as an explicit author statement.\n\n"
-        f"<synthesis>{json.dumps(synthesis.model_dump(mode='json'), ensure_ascii=False)}</synthesis>\n"
+        "<synthesis>"
+        f"{json.dumps(synthesis.model_dump(mode='json'), ensure_ascii=False)}"
+        "</synthesis>\n"
         f"<verified_evidence>{json.dumps(evidence_payload, ensure_ascii=False)}</verified_evidence>"
     )
 
@@ -608,6 +1438,9 @@ def analyze_book(
     adapter: ModelAdapter,
     config: PipelineConfig,
     on_progress: ProgressCallback | None = None,
+    *,
+    checkpoint: AnalysisCheckpoint | None = None,
+    on_checkpoint: CheckpointCallback | None = None,
 ) -> BookAnalysis:
     """Analyze a complete book through the module's single public interface."""
     if not book.chapters:
@@ -616,24 +1449,69 @@ def analyze_book(
         raise ValueError("chapters_per_batch must be at least 1")
     if config.max_concurrency < 1:
         raise ValueError("max_concurrency must be at least 1")
+    if config.synthesis_batch_chars < 1_000:
+        raise ValueError("synthesis_batch_chars must be at least 1000")
     if any(not chapter.text.strip() for chapter in book.chapters):
         raise ValueError("every chapter must contain text")
     numbers = [chapter.number for chapter in book.chapters]
     if len(numbers) != len(set(numbers)):
         raise ValueError("chapter numbers must be unique")
-    _notify(on_progress, "source_validation", 3, "source and chapter structure validated")
 
-    chapter_results: list[ChapterAnalysis | None] = [None] * len(book.chapters)
+    active_checkpoint = (
+        checkpoint.model_copy(deep=True) if checkpoint is not None else AnalysisCheckpoint()
+    )
+    has_checkpoint = bool(
+        active_checkpoint.chapters
+        or active_checkpoint.parts
+        or active_checkpoint.synthesis
+        or active_checkpoint.reconciliation
+    )
+    if not has_checkpoint:
+        _notify(
+            on_progress,
+            "source_validation",
+            3,
+            "source and chapter structure validated",
+        )
+
+    def save_checkpoint(**updates: Any) -> None:
+        nonlocal active_checkpoint
+        active_checkpoint = active_checkpoint.model_copy(update=updates, deep=True)
+        if on_checkpoint:
+            on_checkpoint(active_checkpoint.model_copy(deep=True))
+
+    checkpoint_chapters = {
+        chapter.chapter_number: chapter
+        for chapter in active_checkpoint.chapters
+        if chapter.chapter_number in numbers
+    }
+    chapter_results: list[ChapterAnalysis | None] = [
+        checkpoint_chapters.get(chapter.number) for chapter in book.chapters
+    ]
     total_chapters = len(book.chapters)
+    completed = sum(item is not None for item in chapter_results)
+    if completed < total_chapters:
+        _notify(
+            on_progress,
+            "segment_analysis",
+            5 + round(completed / total_chapters * 45),
+            f"resuming with {completed}/{total_chapters} chapters checkpointed",
+        )
     if config.max_concurrency == 1:
         for chapter_index, chapter in enumerate(book.chapters):
+            if chapter_results[chapter_index] is not None:
+                continue
             chapter_results[chapter_index] = _analyze_source_chapter(
                 book,
                 chapter,
                 adapter,
                 config,
             )
-            progress = 5 + round((chapter_index + 1) / total_chapters * 45)
+            completed += 1
+            save_checkpoint(
+                chapters=[item for item in chapter_results if item is not None]
+            )
+            progress = 5 + round(completed / total_chapters * 45)
             _notify(
                 on_progress,
                 "chapter_synthesis",
@@ -654,12 +1532,20 @@ def analyze_book(
                     config,
                 ): index
                 for index, chapter in enumerate(book.chapters)
+                if chapter_results[index] is None
             }
-            completed = 0
+            chapter_failures: list[Exception] = []
             for future in as_completed(future_indexes):
                 chapter_index = future_indexes[future]
-                chapter_results[chapter_index] = future.result()
+                try:
+                    chapter_results[chapter_index] = future.result()
+                except Exception as exc:
+                    chapter_failures.append(exc)
+                    continue
                 completed += 1
+                save_checkpoint(
+                    chapters=[item for item in chapter_results if item is not None]
+                )
                 progress = 5 + round(completed / total_chapters * 45)
                 _notify(
                     on_progress,
@@ -667,47 +1553,167 @@ def analyze_book(
                     progress,
                     f"chapter {book.chapters[chapter_index].number} analyzed",
                 )
+            if chapter_failures:
+                raise chapter_failures[0]
 
     ordered_chapters = [item for item in chapter_results if item is not None]
     if len(ordered_chapters) != total_chapters:
         raise RuntimeError("one or more chapters did not produce an analysis")
 
-    parts = _synthesize_parts(adapter, config, ordered_chapters)
-    _notify(on_progress, "book_synthesis", 65, f"{len(parts)} hierarchical parts synthesized")
-    synthesis = adapter.generate(
-        task="book_synthesis",
-        system="You synthesize complete books without losing evidence provenance.",
-        prompt=_book_synthesis_prompt(book, parts),
-        response_model=BookSynthesis,
-        model=config.reading_model,
-    )
+    parts = active_checkpoint.parts
+    if not parts:
+        _notify(on_progress, "book_synthesis", 55, "synthesizing chapter groups")
+        parts = _synthesize_parts(adapter, config, ordered_chapters)
+        save_checkpoint(parts=parts)
 
     source_chapters = {chapter.number: chapter for chapter in book.chapters}
     verified_chapters = _walk_and_verify(ordered_chapters, source_chapters)
+    verified_parts = _walk_and_verify(parts, source_chapters)
+    citation_catalog = _verified_citation_catalog(
+        [verified_chapters, verified_parts]
+    )
+
+    synthesis = active_checkpoint.synthesis
+    if synthesis is None:
+        _notify(
+            on_progress,
+            "book_synthesis",
+            65,
+            f"{len(parts)} parts verified; merging whole-book claims",
+        )
+        claims = active_checkpoint.book_claims
+        if claims is None:
+            candidates = _claim_candidates(verified_parts, citation_catalog)
+            claim_batches = dict(active_checkpoint.claim_merge_batches)
+
+            def save_claim_batch(key: str, result: ClaimMergeResult) -> None:
+                claim_batches[key] = result
+                save_checkpoint(claim_merge_batches=dict(claim_batches))
+
+            claims, claim_contradictions, claim_uncertainties = (
+                _merge_claims_adaptively(
+                    adapter,
+                    model=config.reading_model,
+                    candidates=candidates,
+                    catalog=citation_catalog,
+                    cached_batches=claim_batches,
+                    on_batch=save_claim_batch,
+                    max_batch_chars=config.synthesis_batch_chars,
+                    max_concurrency=config.max_concurrency,
+                )
+            )
+            save_checkpoint(
+                book_claims=claims,
+                claim_contradictions=claim_contradictions,
+                claim_uncertainties=claim_uncertainties,
+            )
+        else:
+            claim_contradictions = active_checkpoint.claim_contradictions
+            claim_uncertainties = active_checkpoint.claim_uncertainties
+
+        timeline = _merge_verified_timeline(verified_parts)
+        editorial = active_checkpoint.editorial
+        if editorial is None:
+            _notify(
+                on_progress,
+                "book_synthesis",
+                70,
+                "generating evidence-bounded reader report",
+            )
+            editorial_sections: dict[str, BaseModel] = {
+                key: value
+                for key, value in {
+                    "structure": active_checkpoint.editorial_structure,
+                    "interpretation": active_checkpoint.editorial_interpretation,
+                    "mysteries": active_checkpoint.editorial_mysteries,
+                }.items()
+                if value is not None
+            }
+
+            def save_editorial_section(key: str, result: BaseModel) -> None:
+                editorial_sections[key] = result
+                save_checkpoint(**{f"editorial_{key}": result})
+
+            editorial = _generate_editorial_adaptively(
+                adapter,
+                model=config.reading_model,
+                prompt=_editorial_prompt(
+                    book,
+                    verified_parts,
+                    timeline,
+                    claims,
+                ),
+                split_mode=active_checkpoint.editorial_split,
+                cached_sections=editorial_sections,
+                on_split=lambda: save_checkpoint(editorial_split=True),
+                on_section=save_editorial_section,
+            )
+            save_checkpoint(editorial=editorial)
+
+        editorial_payload = editorial.model_dump(
+            mode="python",
+            exclude={"contradictions", "uncertainties"},
+        )
+        synthesis = BookSynthesis(
+            **editorial_payload,
+            timeline=timeline,
+            claims=claims,
+            contradictions=list(
+                dict.fromkeys(
+                    [*editorial.contradictions, *claim_contradictions]
+                )
+            ),
+            uncertainties=list(
+                dict.fromkeys(
+                    [*editorial.uncertainties, *claim_uncertainties]
+                )
+            ),
+        )
+        save_checkpoint(synthesis=synthesis)
+
     verified_synthesis = _walk_and_verify(synthesis, source_chapters)
+    citation_catalog.update(_verified_citation_catalog(verified_synthesis))
     evidence_index = _deduplicate_evidence(verified_chapters)
     all_pre_reconciliation = _all_citations(verified_chapters) + _all_citations(
         verified_synthesis
     )
     verified_count = sum(item.verified for item in all_pre_reconciliation)
-    _notify(
-        on_progress,
-        "evidence_verification",
-        78,
-        f"{verified_count}/{len(all_pre_reconciliation)} citations verified",
-    )
+    if active_checkpoint.reconciliation is None:
+        _notify(
+            on_progress,
+            "evidence_verification",
+            78,
+            f"{verified_count}/{len(all_pre_reconciliation)} citations verified",
+        )
 
-    reconciliation = adapter.generate(
-        task="book_reconciliation",
-        system="You are the final evidence auditor for a whole-book analysis.",
-        prompt=_reconciliation_prompt(
-            verified_synthesis,
-            _reconciliation_evidence(verified_synthesis, evidence_index),
-        ),
-        response_model=ReconciliationResult,
-        model=config.reconciliation_model,
-        temperature=0,
-    )
+    reconciliation = active_checkpoint.reconciliation
+    if reconciliation is None:
+        _notify(
+            on_progress,
+            "full_book_reconciliation",
+            82,
+            "auditing whole-book claims against verified evidence",
+        )
+        if verified_synthesis.claims:
+            audit_batches = dict(active_checkpoint.claim_audit_batches)
+
+            def save_audit_batch(key: str, result: ClaimAuditResult) -> None:
+                audit_batches[key] = result
+                save_checkpoint(claim_audit_batches=dict(audit_batches))
+
+            reconciliation = _audit_claims_adaptively(
+                adapter,
+                model=config.reconciliation_model,
+                claims=verified_synthesis.claims,
+                catalog=citation_catalog,
+                cached_batches=audit_batches,
+                on_batch=save_audit_batch,
+                max_batch_chars=config.synthesis_batch_chars,
+                max_concurrency=config.max_concurrency,
+            )
+        else:
+            reconciliation = ReconciliationResult()
+        save_checkpoint(reconciliation=reconciliation)
     verified_reconciliation = _walk_and_verify(reconciliation, source_chapters)
     all_citations = all_pre_reconciliation + _all_citations(verified_reconciliation)
     verified_count = sum(item.verified for item in all_citations)

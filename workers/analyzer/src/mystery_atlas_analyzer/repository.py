@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -11,6 +11,7 @@ from sqlalchemy import MetaData, Table, create_engine, delete, insert, or_, sele
 from sqlalchemy.engine import Engine
 
 from .contracts import (
+    AnalysisCheckpoint,
     BookAnalysis,
     BookInput,
     ClaimFinding,
@@ -26,7 +27,11 @@ class LoadedJob:
     track: str
     work_id: str
     edition_id: str
+    status: str
+    stage: str
+    progress: int
     book: BookInput
+    checkpoint: AnalysisCheckpoint
 
 
 def _stable_id(kind: str, *parts: object) -> str:
@@ -133,13 +138,49 @@ class SQLAlchemyAnalysisRepository:
             language=str(edition["language"] or "zh-CN"),
             chapters=chapters,
         )
+        result_summary = _json_value(job["result_summary"])
+        checkpoint_payload = (
+            result_summary.get("checkpoint")
+            if isinstance(result_summary, dict)
+            else None
+        )
+        checkpoint = (
+            AnalysisCheckpoint.model_validate(checkpoint_payload)
+            if isinstance(checkpoint_payload, dict)
+            else AnalysisCheckpoint()
+        )
         return LoadedJob(
             job_id=job_id,
             track=str(job["track"]),
             work_id=str(work["id"]),
             edition_id=str(edition["id"]),
+            status=str(job["status"]),
+            stage=str(job["stage"]),
+            progress=int(job["progress"]),
             book=book,
+            checkpoint=checkpoint,
         )
+
+    def save_checkpoint(
+        self,
+        job_id: str,
+        checkpoint: AnalysisCheckpoint,
+    ) -> None:
+        jobs = self.table("analysis_jobs")
+        with self.engine.begin() as connection:
+            current = connection.execute(
+                select(jobs.c.result_summary).where(jobs.c.id == job_id)
+            ).scalar_one_or_none()
+            if current is None:
+                raise LookupError(f"analysis job {job_id} does not exist")
+            decoded = _json_value(current)
+            result_summary = dict(decoded) if isinstance(decoded, dict) else {}
+            result_summary["checkpoint"] = checkpoint.model_dump(mode="json")
+            connection.execute(
+                update(jobs)
+                .where(jobs.c.id == job_id)
+                .values(result_summary=result_summary)
+            )
 
     def update_job(
         self,
@@ -177,6 +218,35 @@ class SQLAlchemyAnalysisRepository:
                 )
             )
 
+    def heartbeat_job(
+        self,
+        job_id: str,
+        *,
+        call_id: str,
+        task: str,
+        response_chars: int,
+        content_idle_seconds: int,
+    ) -> None:
+        jobs = self.table("analysis_jobs")
+        now = datetime.now(UTC)
+        values: dict[str, Any] = {
+            "heartbeat_at": now,
+            "current_call_id": call_id,
+            "stage_detail": task[:300],
+            "response_chars": response_chars,
+            "content_idle_seconds": content_idle_seconds,
+        }
+        if "updated_at" in jobs.c:
+            values["updated_at"] = now
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(jobs)
+                .where(jobs.c.id == job_id)
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                raise LookupError(f"analysis job {job_id} does not exist")
+
     def _row_exists(self, connection: Any, table: Table, row_id: str) -> bool:
         return (
             connection.execute(
@@ -192,7 +262,7 @@ class SQLAlchemyAnalysisRepository:
         values: dict[str, Any],
     ) -> bool:
         insert_values = dict(values)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if "created_at" in table.c and "created_at" not in insert_values:
             insert_values["created_at"] = now
         if "updated_at" in table.c and "updated_at" not in insert_values:

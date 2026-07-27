@@ -138,6 +138,84 @@ class ReconciliationResult(BaseModel):
     review_notes: list[str] = Field(default_factory=list)
 
 
+class ClaimMergeDecision(BaseModel):
+    statement: str
+    kind: Literal["author_explicit", "analysis_inference", "open_question"]
+    status: Literal["confirmed", "inferred", "disputed", "uncertain"] = "inferred"
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    introduced_chapter: int = Field(ge=1)
+    resolved_chapter: int | None = Field(default=None, ge=1)
+    reasoning: list[str] = Field(default_factory=list)
+    source_claim_ids: list[str] = Field(default_factory=list)
+
+
+class ClaimMergeResult(BaseModel):
+    claims: list[ClaimMergeDecision] = Field(default_factory=list)
+    contradictions: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+
+
+class BookEditorial(BaseModel):
+    overview: str
+    structure: list[StructureSection] = Field(default_factory=list)
+    core_ideas: list[str] = Field(default_factory=list)
+    themes: list[str] = Field(default_factory=list)
+    character_arcs: list[str] = Field(default_factory=list)
+    mysteries: list[str] = Field(default_factory=list)
+    contradictions: list[str] = Field(default_factory=list)
+    foreshadowing: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    action_insights: list[str] = Field(default_factory=list)
+
+
+class BookStructureEditorial(BaseModel):
+    overview: str
+    structure: list[StructureSection] = Field(default_factory=list)
+
+
+class BookInterpretationEditorial(BaseModel):
+    core_ideas: list[str] = Field(default_factory=list)
+    themes: list[str] = Field(default_factory=list)
+    character_arcs: list[str] = Field(default_factory=list)
+    action_insights: list[str] = Field(default_factory=list)
+
+
+class BookMysteryEditorial(BaseModel):
+    mysteries: list[str] = Field(default_factory=list)
+    contradictions: list[str] = Field(default_factory=list)
+    foreshadowing: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+
+
+class ClaimAuditDecision(BaseModel):
+    claim_id: str
+    verdict: Literal["supported", "unsupported", "uncertain"]
+
+
+class ClaimAuditResult(BaseModel):
+    decisions: list[ClaimAuditDecision] = Field(default_factory=list)
+    contradictions: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    review_notes: list[str] = Field(default_factory=list)
+
+
+class AnalysisCheckpoint(BaseModel):
+    chapters: list[ChapterAnalysis] = Field(default_factory=list)
+    parts: list[PartSynthesis] = Field(default_factory=list)
+    claim_merge_batches: dict[str, ClaimMergeResult] = Field(default_factory=dict)
+    book_claims: list[ClaimFinding] | None = None
+    claim_contradictions: list[str] = Field(default_factory=list)
+    claim_uncertainties: list[str] = Field(default_factory=list)
+    editorial: BookEditorial | None = None
+    editorial_split: bool = False
+    editorial_structure: BookStructureEditorial | None = None
+    editorial_interpretation: BookInterpretationEditorial | None = None
+    editorial_mysteries: BookMysteryEditorial | None = None
+    claim_audit_batches: dict[str, ClaimAuditResult] = Field(default_factory=dict)
+    synthesis: BookSynthesis | None = None
+    reconciliation: ReconciliationResult | None = None
+
+
 class EvidenceAudit(BaseModel):
     total_citations: int = 0
     verified_citations: int = 0
@@ -168,6 +246,7 @@ class AnalysisProgress(BaseModel):
 
 
 ProgressCallback = Callable[[AnalysisProgress], None]
+CheckpointCallback = Callable[[AnalysisCheckpoint], None]
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 

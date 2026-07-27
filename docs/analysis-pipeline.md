@@ -25,9 +25,9 @@ result = run_analysis_job(job_id)
 1. `source_validation`：检查章节非空、章节号唯一。
 2. `segment_analysis`：按语义边界切分超长章节，保留重叠上下文；逐段提取人物、关系、事件、证据和观点。
 3. `chapter_synthesis`：合并同一章节的多个分段结果，去重并保留原文引文。
-4. `book_synthesis`：先按连续章节生成部分综合，再生成全书结构、核心观点、主题、人物弧线、时间线、谜题、矛盾和伏笔。
-5. `evidence_verification`：把每条引文重新定位到章节原文；记录字符区间，PDF 同时记录页码。无法定位的引文不会被标记为已验证。
-6. `full_book_reconciliation`：只使用已验证证据复核全书推断，区分作者明确表达、分析推断和开放问题，并列出无支持观点。
+4. `book_synthesis`：先按连续章节生成部分综合，并保存逐批检查点。
+5. `evidence_verification`：在全书结论形成前，把章节与部分综合中的每条引文重新定位到原文；记录字符区间，PDF 同时记录页码。无法定位的引文不会进入全书事实层。
+6. `full_book_reconciliation`：基于已验证证据分批合并观点；时间线由程序确定性合并；编辑型 AI 只生成结构、主题、人物弧线、谜题、矛盾和伏笔；最后对观点执行一次分批证据审计。
 7. `persistence`：保存完整报告和结构化人物、关系、证据、观点、章节快照。
 
 ## 正文与章节边界
@@ -41,7 +41,9 @@ result = run_analysis_job(job_id)
 - 默认单段上限为 12,000 字符，重叠 500 字符。
 - 章节超过上限时先做段级分析，再做章节合并。
 - 默认每 6 章形成一个部分综合。
-- 全书综合只读取部分综合和紧凑章节数据，不把整本书重新塞进一次模型调用。
+- 全书观点合并与最终观点审计按请求字符数自适应二分，并可在同一本书内并发执行；默认每批输入上限为 40,000 字符。
+- 时间线只合并已验证事件，不再交给 AI 重写；编辑任务不接收原始证据正文，不能新增事实。
+- 编辑任务被服务端截断或持续无内容时，会拆成结构、解读、谜题三个独立任务。
 - 参数可通过环境变量调整。
 
 ## 证据与原文回溯
@@ -84,31 +86,42 @@ MYSTERY_ATLAS_AI_API_KEY=...
 MYSTERY_ATLAS_AI_READING_MODEL=...
 MYSTERY_ATLAS_AI_TRUTH_MODEL=...
 MYSTERY_ATLAS_AI_TIMEOUT_SECONDS=90
-MYSTERY_ATLAS_AI_MAX_OUTPUT_TOKENS=8000
+MYSTERY_ATLAS_AI_CONTENT_IDLE_TIMEOUT_SECONDS=180
 MYSTERY_ATLAS_AI_MAX_CHUNK_CHARS=12000
 MYSTERY_ATLAS_AI_CHUNK_OVERLAP_CHARS=500
 MYSTERY_ATLAS_AI_CHAPTERS_PER_BATCH=6
 MYSTERY_ATLAS_AI_MAX_CONCURRENCY=10
+MYSTERY_ATLAS_AI_SYNTHESIS_BATCH_CHARS=40000
 ```
 
 `AI_TRUTH_MODEL` 为空时，全书复核沿用 reading model。
 
-DeepSeek V4 Pro 用于批量结构化 JSON 时显式关闭 thinking mode。最终全书复核只提交
-与综合结论直接相关的已验证证据，并使用独立的 8,000 token 输出上限，避免把整个
-证据库重复发送给模型。
+DeepSeek V4 Pro 用于批量结构化 JSON 时显式关闭 thinking mode。整书分析请求不发送
+`max_tokens`，由模型服务根据任务自行决定输出容量。观点任务只提交对应的已验证证据
+ID 与去重证据，避免把整个证据库重复发送给模型。若服务端仍以 `length` 截断，
+流水线会拆分当前批次，而不是重复发送同一个大请求。
 
 Moonshot 的中国站与国际站 Key 不互通：中国站 Key 使用
 `https://api.moonshot.cn/v1`，国际站 Key 使用
 `https://api.moonshot.ai/v1`。分析器使用流式 SSE 接收长响应，以避免等待完整
 JSON 时触发读取超时；只有收到 `[DONE]` 才接受结果。
 
+模型流连续 3 分钟没有产生有效内容时视为 content-idle。可拆分的大任务会立即缩小
+批次，最小批次只原样重试一次。HTTP 429、服务端 5xx、网络错误和结构化响应修复由
+模型适配器统一重试，任务运行器不再叠加第二层重试。
+
 本地 `inline` 模式会在 HTTP 响应结束后启动独立分析进程。API 重启不会重复派发
 已经处于 `running` 的任务；数据库原子认领保证同一任务只有一个进程执行。
 任务内部错误只保留在后端，工作台接口返回经过归类的用户提示。
 
-章节提取和分部汇总最多并发执行 `AI_MAX_CONCURRENCY` 个模型请求，默认值为
-10。全书汇总与证据复核仍按依赖顺序串行执行；如果供应商返回 429，可把该值
-降为 5 或更低。
+`AI_MAX_CONCURRENCY` 是单本书的并发上限，默认值为 10；它用于章节提取、分部汇总
+以及预拆分的观点合并/审计批次。当前实现不设置跨书全局并发上限；如果供应商返回
+429，可把该值降为 5 或更低。
+
+流式请求每 15 秒写入安全心跳元数据（任务类型、调用 ID、已接收字符数、内容空闲
+秒数），不记录 prompt、响应正文或 API Key。API 每分钟扫描一次运行任务；心跳超过
+5 分钟未更新时只把任务标记为失败并保留检查点，不会自动重发 AI 请求。用户重试时
+从最近的章节、分部、观点批次、编辑分段或审计批次继续。
 
 ## 持久化与人工内容保护
 
@@ -126,4 +139,4 @@ JSON 时触发读取超时；只有收到 `[DONE]` 才接受结果。
 .\.venv\Scripts\pytest.exe -q workers\analyzer\tests apps\api\tests
 ```
 
-测试覆盖分层综合、证据成功与失败验证、全书复核、SQLite 实际落库，以及未配置 AI 时的上传任务状态。
+测试覆盖分层综合、自适应拆分、证据成功与失败验证、统一重试、流式心跳、僵尸任务恢复、SQLite 实际落库，以及未配置 AI 时的上传任务状态。

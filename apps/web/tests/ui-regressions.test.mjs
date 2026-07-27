@@ -90,12 +90,26 @@ test("import confirmation only asks for archive type after AI metadata preparse"
 
 test("workbench analysis consoles use the selected book instead of demo fixtures", async () => {
   const workbench = await source("apps/web/src/components/workbench.tsx");
+  const apiTypes = await source("apps/web/src/lib/api.ts");
 
   assert.doesNotMatch(workbench, /from ["']@\/lib\/demo-data["']/);
   assert.match(workbench, /`\/library\/\$\{libraryItemId\}`/);
   assert.match(workbench, /`\/works\/\$\{slug\}`/);
   assert.match(workbench, /\/analysis\?through_chapter=\$\{chapter\}/);
-  assert.match(workbench, /\/analysis\/retry/);
+  assert.match(apiTypes, /job_id:\s*string\s*\|\s*null/);
+  assert.match(apiTypes, /can_manage_retry:\s*boolean/);
+  assert.match(apiTypes, /can_retry:\s*boolean/);
+  assert.match(apiTypes, /can_restart:\s*boolean/);
+  assert.match(apiTypes, /retry_hint:\s*string/);
+  assert.match(workbench, /`\/analysis-jobs\/\$\{analysis\.job_id\}\/retry-stage`/);
+  assert.match(workbench, /`\/analysis-jobs\/\$\{analysis\.job_id\}\/restart`/);
+  assert.match(workbench, /analysis\?\.can_manage_retry/);
+  assert.match(workbench, /analysis\.can_retry \|\| analysis\.can_restart/);
+  assert.match(workbench, /window\.confirm/);
+  assert.match(workbench, /重试失败阶段/);
+  assert.match(workbench, /从头重新分析/);
+  assert.match(workbench, /analysis\?\.retry_hint/);
+  assert.doesNotMatch(workbench, /\/analysis\/retry/);
   assert.doesNotMatch(workbench, /雾港钟楼|第二枚钟锤|沈砚|顾青禾/);
 });
 

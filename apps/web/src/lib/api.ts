@@ -124,11 +124,21 @@ export type GraphEdge = {
 export type WorkbenchAnalysis = {
   work_id: string;
   work_slug: string;
+  job_id: string | null;
   through_chapter: number;
   status: string;
   stage: string;
   progress: number;
   error: string | null;
+  heartbeat_at: string | null;
+  current_call_id: string | null;
+  stage_detail: string | null;
+  response_chars: number;
+  content_idle_seconds: number;
+  can_manage_retry: boolean;
+  can_retry: boolean;
+  can_restart: boolean;
+  retry_hint: string;
   graph: {
     work_slug: string;
     through_chapter: number;

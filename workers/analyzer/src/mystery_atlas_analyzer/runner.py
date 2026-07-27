@@ -2,11 +2,37 @@ from __future__ import annotations
 
 from typing import Any
 
-from .contracts import AnalysisProgress, ModelAdapter, ProgressCallback
-from .model_adapters import ModelConfigurationError, OpenAICompatibleAdapter
+from .contracts import (
+    AnalysisCheckpoint,
+    AnalysisProgress,
+    ModelAdapter,
+    ProgressCallback,
+)
+from .model_adapters import (
+    AIRequestProgress,
+    ModelConfigurationError,
+    OpenAICompatibleAdapter,
+)
 from .pipeline import PipelineConfig, analyze_book
 from .repository import SQLAlchemyAnalysisRepository
 from .settings import AnalyzerSettings
+
+
+def _resume_stage(
+    checkpoint: AnalysisCheckpoint,
+    *,
+    total_chapters: int,
+) -> tuple[str, int]:
+    if checkpoint.reconciliation is not None:
+        return "persistence", 96
+    if checkpoint.synthesis is not None:
+        return "evidence_verification", 78
+    if checkpoint.parts or len(checkpoint.chapters) >= total_chapters:
+        return "book_synthesis", 65
+    if checkpoint.chapters:
+        progress = 5 + round(len(checkpoint.chapters) / total_chapters * 45)
+        return "segment_analysis", progress
+    return "source_validation", 1
 
 
 def run_analysis_job(
@@ -20,6 +46,15 @@ def run_analysis_job(
     current_settings = settings or AnalyzerSettings.from_env()
     repo = repository or SQLAlchemyAnalysisRepository(current_settings.database_url)
     loaded = repo.load_job(job_id)
+
+    def stream_progress(update: AIRequestProgress) -> None:
+        repo.heartbeat_job(
+            job_id,
+            call_id=update.call_id,
+            task=update.task,
+            response_chars=update.response_chars,
+            content_idle_seconds=update.content_idle_seconds,
+        )
 
     if adapter is None:
         if not current_settings.is_model_configured:
@@ -37,11 +72,28 @@ def run_analysis_job(
         adapter = OpenAICompatibleAdapter(
             base_url=current_settings.ai_base_url,
             api_key=current_settings.ai_api_key,
+            job_id=job_id,
+            work_id=loaded.work_id,
+            edition_id=loaded.edition_id,
             timeout_seconds=current_settings.timeout_seconds,
-            max_output_tokens=current_settings.max_output_tokens,
+            content_idle_timeout_seconds=(
+                current_settings.content_idle_timeout_seconds
+            ),
+            progress_callback=stream_progress,
         )
 
+    resume_stage, resume_progress = _resume_stage(
+        loaded.checkpoint,
+        total_chapters=len(loaded.book.chapters),
+    )
+    current_stage = resume_stage
+    current_progress = max(resume_progress, loaded.progress if loaded.status == "failed" else 0)
+    active_checkpoint = loaded.checkpoint
+
     def progress(update: AnalysisProgress) -> None:
+        nonlocal current_stage, current_progress
+        current_stage = update.stage
+        current_progress = update.progress
         repo.update_job(
             job_id,
             status="running",
@@ -52,11 +104,16 @@ def run_analysis_job(
         if on_progress:
             on_progress(update)
 
+    def checkpoint(update: AnalysisCheckpoint) -> None:
+        nonlocal active_checkpoint
+        active_checkpoint = update
+        repo.save_checkpoint(job_id, update)
+
     repo.update_job(
         job_id,
         status="running",
-        stage="source_validation",
-        progress=1,
+        stage=current_stage,
+        progress=current_progress,
         error=None,
     )
     try:
@@ -70,8 +127,11 @@ def run_analysis_job(
                 chunk_overlap_chars=current_settings.chunk_overlap_chars,
                 chapters_per_batch=current_settings.chapters_per_batch,
                 max_concurrency=current_settings.max_concurrency,
+                synthesis_batch_chars=current_settings.synthesis_batch_chars,
             ),
             on_progress=progress,
+            checkpoint=active_checkpoint,
+            on_checkpoint=checkpoint,
         )
         progress(AnalysisProgress(stage="persistence", progress=96, detail="saving report"))
         counts = repo.persist_report(job_id, report)
@@ -87,8 +147,8 @@ def run_analysis_job(
         repo.update_job(
             job_id,
             status="failed",
-            stage="failed",
-            progress=0,
+            stage=current_stage,
+            progress=current_progress,
             error=str(exc)[:4000],
         )
         raise

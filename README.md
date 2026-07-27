@@ -17,7 +17,8 @@
 - `apps/web`：档案库、阅读工作台、账户、上传与维护界面。
 - `apps/api`：FastAPI 账户、上传解析、作品版本、阅读记录、反馈和治理 API。
 - `workers/analyzer`：可执行的分层整书 AI 分析、证据复核与结构化落库模块。
-- `infra/docker`：Web、API、分析 Worker、PostgreSQL、Redis 和 MinIO 的完整容器部署。
+- `compose.yaml`：Web、API、分析 Worker、PostgreSQL、Redis 和 MinIO 的默认容器部署入口。
+- `infra/docker`：API 与 Web 的镜像构建文件。
 
 ## 本地启动
 
@@ -51,7 +52,7 @@ Docker Compose 会启动 Web、API、Celery 分析 Worker、PostgreSQL、Redis �
 本机直接启动：
 
 ```powershell
-docker compose -f infra/docker/compose.yaml up --build -d
+docker-compose up --build -d
 ```
 
 默认地址为 `http://127.0.0.1:3100`。首次启动会自动执行数据库迁移；如果项目目录中已有 `.data/mystery-atlas.db` 和 `.data/uploads`，迁移容器会使用 SQLite 一致性快照把现有账户、档案、阅读进度、AI 结果和源文件迁移到 PostgreSQL 与持久卷，并重建旧书的阅读排版。原始 `.data` 不会被删除或覆盖。
@@ -60,14 +61,14 @@ docker compose -f infra/docker/compose.yaml up --build -d
 
 ```powershell
 Copy-Item .env.docker.example .env.docker
-docker compose --env-file .env.docker -f infra/docker/compose.yaml up --build -d
+docker-compose --env-file .env.docker up --build -d
 ```
 
 查看状态和迁移报告：
 
 ```powershell
-docker compose -f infra/docker/compose.yaml ps
-docker compose -f infra/docker/compose.yaml logs migrate
+docker-compose ps
+docker-compose logs migrate
 ```
 
 当前 Compose 交付不包含公网域名和 HTTPS。接入服务器和反向代理后，应替换所有示例密码、使用随机会话密钥，并把 `MYSTERY_ATLAS_SESSION_COOKIE_SECURE` 设为 `true`。

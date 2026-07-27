@@ -64,6 +64,13 @@ def ensure_development_columns() -> None:
             "import_id": "VARCHAR(36)",
             "kind": "VARCHAR(32) NOT NULL DEFAULT 'private_upload'",
         },
+        "analysis_jobs": {
+            "heartbeat_at": "DATETIME",
+            "current_call_id": "VARCHAR(36)",
+            "stage_detail": "VARCHAR(300)",
+            "response_chars": "INTEGER NOT NULL DEFAULT 0",
+            "content_idle_seconds": "INTEGER NOT NULL DEFAULT 0",
+        },
     }
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())

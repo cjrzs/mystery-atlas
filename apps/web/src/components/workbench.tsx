@@ -390,11 +390,27 @@ export function Workbench({
   };
 
   const retryAnalysis = async () => {
-    const itemId = libraryItemId ?? libraryRecordId;
-    if (!itemId) return;
+    if (
+      !analysis?.job_id ||
+      !(analysis.can_retry || analysis.can_restart)
+    ) {
+      return;
+    }
+    const restartFromBeginning = !analysis.can_retry && analysis.can_restart;
+    if (
+      restartFromBeginning &&
+      !window.confirm(
+        "这条旧任务没有阶段检查点，只能从头重新分析，并会重新消耗 Token。确认继续吗？",
+      )
+    ) {
+      return;
+    }
+    const endpoint = restartFromBeginning
+      ? `/analysis-jobs/${analysis.job_id}/restart`
+      : `/analysis-jobs/${analysis.job_id}/retry-stage`;
     setRetryingAnalysis(true);
     try {
-      await apiRequest(`/library/${itemId}/analysis/retry`, {
+      await apiRequest(endpoint, {
         method: "POST",
       });
       setAnalysisRefresh((current) => current + 1);
@@ -699,7 +715,6 @@ export function Workbench({
           <AnalysisStatus
             analysis={analysis}
             state={analysisState}
-            canRetry={Boolean(libraryItemId ?? libraryRecordId)}
             retrying={retryingAnalysis}
             onRetry={retryAnalysis}
           />
@@ -1096,13 +1111,11 @@ function ReaderSettings({
 function AnalysisStatus({
   analysis,
   state,
-  canRetry,
   retrying,
   onRetry,
 }: {
   analysis: WorkbenchAnalysis | null;
   state: LoadState;
-  canRetry: boolean;
   retrying: boolean;
   onRetry: () => void;
 }) {
@@ -1120,9 +1133,21 @@ function AnalysisStatus({
         <span className="workbench-analysis-actions">
           {(analysis?.status === "failed" ||
             analysis?.status === "waiting_configuration") &&
-            canRetry && (
-              <button disabled={retrying} onClick={onRetry} type="button">
-                {retrying ? "正在重试…" : "重新分析"}
+            analysis?.can_manage_retry &&
+            analysis.job_id && (
+              <button
+                disabled={
+                  retrying ||
+                  !(analysis.can_retry || analysis.can_restart)
+                }
+                onClick={onRetry}
+                type="button"
+              >
+                {retrying
+                  ? "正在重新分析…"
+                  : analysis.can_retry
+                    ? "重试失败阶段"
+                    : "从头重新分析"}
               </button>
             )}
           <strong>{progress}%</strong>
@@ -1132,6 +1157,23 @@ function AnalysisStatus({
         <i style={{ width: `${progress}%` }} />
       </div>
       <small>{stage}</small>
+      {analysis?.stage_detail && analysis.status === "running" && (
+        <small>
+          {analysis.stage_detail}
+          {analysis.current_call_id
+            ? ` · ${analysis.current_call_id}`
+            : ""}
+          {analysis.response_chars > 0
+            ? ` · 已接收 ${analysis.response_chars.toLocaleString()} 字符`
+            : ""}
+          {analysis.content_idle_seconds > 0
+            ? ` · ${analysis.content_idle_seconds} 秒无新增内容`
+            : ""}
+        </small>
+      )}
+      {analysis?.retry_hint && (
+        <small className="analysis-retry-hint">{analysis.retry_hint}</small>
+      )}
     </div>
   );
 }

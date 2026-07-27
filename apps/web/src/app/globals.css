@@ -1949,6 +1949,11 @@ kbd {
   padding: 0;
 }
 
+.workbench-analysis-actions button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .workbench-analysis-status .progress-track {
   height: 3px;
 }

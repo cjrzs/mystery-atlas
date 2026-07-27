@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -103,6 +104,11 @@ def test_workbench_analysis_uses_selected_work_and_chapter_horizon() -> None:
                         stage="segment_analysis",
                         status="running",
                         progress=41,
+                        heartbeat_at=datetime.now(UTC),
+                        current_call_id="call-visible",
+                        stage_detail="book_claim_merge",
+                        response_chars=8_192,
+                        content_idle_seconds=12,
                     ),
                 ]
             )
@@ -116,6 +122,11 @@ def test_workbench_analysis_uses_selected_work_and_chapter_horizon() -> None:
     assert payload["work_slug"] == slug
     assert payload["status"] == "running"
     assert payload["progress"] == 41
+    assert payload["current_call_id"] == "call-visible"
+    assert payload["stage_detail"] == "book_claim_merge"
+    assert payload["response_chars"] == 8_192
+    assert payload["content_idle_seconds"] == 12
+    assert payload["heartbeat_at"] is not None
     assert [item["name"] for item in payload["graph"]["nodes"]] == ["Visible Person"]
     assert [item["title"] for item in payload["evidence"]] == ["Visible clue"]
     assert [item["summary"] for item in payload["timeline"]] == ["Visible event"]
