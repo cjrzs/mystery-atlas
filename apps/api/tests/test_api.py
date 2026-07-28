@@ -135,6 +135,7 @@ def test_upload_and_parse_txt(client: TestClient) -> None:
     assert reader.json()["chapters"][0]["blocks"] == [
         {"type": "paragraph", "text": "沈砚在夜里抵达钟楼。"}
     ]
+    assert reader.json()["chapters"][0]["structural_path"] == []
 
     library = client.get("/api/v1/library")
     assert library.status_code == 200

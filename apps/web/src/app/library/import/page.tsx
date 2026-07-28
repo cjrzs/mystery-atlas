@@ -27,6 +27,7 @@ const stageNames: Record<string, string> = {
   detecting_metadata: "AI 预解析档案信息",
   detecting_tags: "AI 预解析档案信息",
   awaiting_confirmation: "等待选择入库类型",
+  structure_review_required: "需要复核章节结构",
   ready_for_analysis: "已进入档案库",
   failed: "解析失败",
 };
@@ -34,6 +35,34 @@ const stageNames: Record<string, string> = {
 function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+type StructureSegment = {
+  source_number: number;
+  start_block: number;
+  end_block: number;
+};
+
+type StructureDraft = {
+  title: string;
+  parent_path: string[];
+  segments: StructureSegment[];
+};
+
+function structureDrafts(item: BookImport): StructureDraft[] {
+  return item.chapters.flatMap((chapter) => {
+    const blockCount = chapter.blocks?.length ?? 0;
+    if (blockCount === 0) return [];
+    return [{
+      title: chapter.title,
+      parent_path: (chapter.structural_path ?? []).slice(0, -1),
+      segments: [{
+        source_number: chapter.number,
+        start_block: 0,
+        end_block: blockCount,
+      }],
+    }];
+  });
 }
 
 export default function ImportPage() {
@@ -152,10 +181,66 @@ export default function ImportPage() {
 
 function ImportRecord({ item, onChanged }: { item: BookImport; onChanged: () => Promise<void> }) {
   const active = item.status === "queued" || item.status === "parsing";
-  const awaiting = item.status === "completed" && !item.work_id;
+  const awaiting = item.status === "completed" && !item.work_id && !item.structure_requires_review;
   const [visibility, setVisibility] = useState<"private" | "public" | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savingStructure, setSavingStructure] = useState(false);
+  const [drafts, setDrafts] = useState<StructureDraft[]>(() => structureDrafts(item));
   const [error, setError] = useState("");
+
+  const updateDraft = (index: number, patch: Partial<StructureDraft>) => {
+    setDrafts((current) => current.map((draft, draftIndex) => (
+      draftIndex === index ? { ...draft, ...patch } : draft
+    )));
+  };
+
+  const mergeWithPrevious = (index: number) => {
+    if (index === 0) return;
+    setDrafts((current) => current.flatMap((draft, draftIndex) => {
+      if (draftIndex === index - 1) {
+        return [{
+          ...draft,
+          segments: [...draft.segments, ...current[index].segments],
+        }];
+      }
+      return draftIndex === index ? [] : [draft];
+    }));
+  };
+
+  const splitAtHeading = (index: number, blockIndex: number, title: string) => {
+    setDrafts((current) => current.flatMap((draft, draftIndex) => {
+      if (draftIndex !== index || draft.segments.length !== 1) return [draft];
+      const segment = draft.segments[0];
+      if (blockIndex <= segment.start_block || blockIndex >= segment.end_block) return [draft];
+      return [
+        {
+          ...draft,
+          segments: [{ ...segment, end_block: blockIndex }],
+        },
+        {
+          title,
+          parent_path: draft.parent_path,
+          segments: [{ ...segment, start_block: blockIndex }],
+        },
+      ];
+    }));
+  };
+
+  const saveStructure = async () => {
+    setSavingStructure(true);
+    setError("");
+    try {
+      await apiRequest<BookImport>(`/imports/${item.id}/structure`, {
+        method: "PUT",
+        body: JSON.stringify({ chapters: drafts }),
+      });
+      await onChanged();
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : "无法保存章节结构");
+    } finally {
+      setSavingStructure(false);
+    }
+  };
 
   const finalize = async () => {
     if (!visibility) {
@@ -185,6 +270,37 @@ function ImportRecord({ item, onChanged }: { item: BookImport; onChanged: () => 
       <header><div><FileText size={17} /><div><strong>{item.detected_title || item.original_name}</strong><span>{item.source_format.toUpperCase()} · {formatBytes(item.size_bytes)}</span></div></div><span className="import-status">{stageNames[item.stage] ?? item.stage}</span></header>
       <div className="import-progress" aria-label={`解析进度 ${item.progress}%`}><i><b style={{ width: `${item.progress}%` }} /></i><span>{item.progress}%</span></div>
       {active && <p><LoaderCircle className="spin" size={14} />{item.stage === "detecting_metadata" ? "正在根据封面、序章或目录预解析书籍信息" : "正在建立章节结构"}</p>}
+      {item.structure_requires_review && <div className="structure-review">
+        <div className="structure-review-heading">
+          <AlertCircle size={16} />
+          <div><strong>请复核章节结构</strong><span>系统发现异常偏长章节。可改名和层级、合并相邻章节，或从内部标题处分拆；保存时会校验正文不丢失、不重复。</span></div>
+        </div>
+        {item.structure_warnings.length > 0 && <ul>{item.structure_warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
+        <div className="structure-chapter-list">
+          {drafts.map((draft, index) => {
+            const segment = draft.segments.length === 1 ? draft.segments[0] : null;
+            const source = segment
+              ? item.chapters.find((chapter) => chapter.number === segment.source_number)
+              : null;
+            const headings = (source?.blocks ?? []).flatMap((block, blockIndex) => (
+              block.type === "heading" && segment && blockIndex > segment.start_block && blockIndex < segment.end_block
+                ? [{ blockIndex, title: block.text || `章节 ${index + 2}` }]
+                : []
+            ));
+            return <div className="structure-chapter-row" key={`${draft.segments.map((part) => `${part.source_number}:${part.start_block}-${part.end_block}`).join("+")}:${index}`}>
+              <span>{index + 1}</span>
+              <label>章节名<input value={draft.title} onChange={(event) => updateDraft(index, { title: event.target.value })} /></label>
+              <label>上级层级<input placeholder="例如：第一部 / 第一卷" value={draft.parent_path.join(" / ")} onChange={(event) => updateDraft(index, { parent_path: event.target.value.split("/").map((part) => part.trim()).filter(Boolean) })} /></label>
+              <div className="structure-chapter-actions">
+                {index > 0 && <button onClick={() => mergeWithPrevious(index)} type="button">并入上一章</button>}
+                {headings.map((heading) => <button key={heading.blockIndex} onClick={() => splitAtHeading(index, heading.blockIndex, heading.title)} type="button">从“{heading.title}”处分拆</button>)}
+              </div>
+            </div>;
+          })}
+        </div>
+        {error && <p className="form-error"><AlertCircle size={14} />{error}</p>}
+        <button className="primary-command" disabled={drafts.length === 0 || savingStructure} onClick={() => void saveStructure()} type="button">{savingStructure ? <LoaderCircle className="spin" size={15} /> : <BookCheck size={15} />}{savingStructure ? "正在保存" : "保存结构并继续"}</button>
+      </div>}
       {awaiting && <div className="archive-confirmation">
         <div className="metadata-preview">
           <div className="metadata-preview-heading"><Sparkles size={16} /><div><strong>AI 预解析结果</strong><span>来自文件元数据、封面、序章或目录；无需手动填写</span></div></div>

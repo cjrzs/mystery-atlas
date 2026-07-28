@@ -106,7 +106,11 @@ def create_public_reading_record(
     return serialize_item(item, user, session)
 
 
-@router.get("/{item_id}/reader", response_model=ReaderResponse)
+@router.get(
+    "/{item_id}/reader",
+    response_model=ReaderResponse,
+    response_model_exclude_unset=True,
+)
 def get_private_reader(
     item_id: str,
     user: User = Depends(get_current_user),
@@ -139,6 +143,11 @@ def get_private_reader(
             ensure_chapter_blocks(chapter, source_format=book_import.source_format)
             for chapter in book_import.chapters
         ],
+        structure_version=book_import.structure_version or "",
+        structure_source=book_import.structure_source or "",
+        structure_confidence=book_import.structure_confidence,
+        structure_warnings=list(book_import.structure_warnings or []),
+        structure_requires_review=book_import.structure_requires_review,
     )
 
 

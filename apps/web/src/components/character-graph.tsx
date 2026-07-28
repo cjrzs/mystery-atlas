@@ -3,6 +3,7 @@
 import cytoscape, { Core } from "cytoscape";
 import { useEffect, useMemo, useRef } from "react";
 import type { GraphEdge, GraphNode } from "@/lib/api";
+import { relationCategory } from "@/lib/graph-labels";
 
 type GraphSelection =
   | { type: "node"; id: string }
@@ -62,7 +63,7 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
         })),
         ...visibleEdges.map((edge) => ({
           data: { id: edge.id, source: edge.source, target: edge.target, label: edge.label, status: edge.status },
-          classes: `kind-${edge.kind} status-${edge.status}`,
+          classes: `kind-${relationCategory(edge.kind)} status-${edge.status}`,
         })),
       ],
     };
@@ -106,7 +107,7 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
             label: "data(label)",
             color: "#17212b",
             "font-family": "Inter, Noto Sans SC, sans-serif",
-            "font-size": 12,
+            "font-size": 14,
             "font-weight": 600,
             "text-valign": "bottom",
             "text-margin-y": 8,
@@ -124,7 +125,7 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
             height: 78,
             "border-width": 4,
             "border-color": "#087e6d",
-            "font-size": 13,
+            "font-size": 15,
             "font-weight": 700,
           },
         },
@@ -144,7 +145,7 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
             label: "data(label)",
             color: "#4e5964",
             "font-family": "Inter, Noto Sans SC, sans-serif",
-            "font-size": 9,
+            "font-size": 12,
             "text-background-color": "#f5f7f8",
             "text-background-opacity": 0.94,
             "text-background-padding": "2px",
@@ -157,6 +158,15 @@ export function CharacterGraph({ nodes, edges, chapter, visibleKinds, selectedId
         { selector: ".kind-action", style: { "line-color": "#188675" } },
         { selector: ".kind-testimony", style: { "line-color": "#8a6f28" } },
         { selector: ".kind-suspicion", style: { "line-color": "#8a5d9b" } },
+        { selector: ".kind-romantic", style: { "line-color": "#9a5d79" } },
+        { selector: ".kind-friendship", style: { "line-color": "#188675" } },
+        { selector: ".kind-professional", style: { "line-color": "#5369a5" } },
+        { selector: ".kind-investigation", style: { "line-color": "#188675" } },
+        { selector: ".kind-crime", style: { "line-color": "#b45042", width: 2.3 } },
+        { selector: ".kind-care", style: { "line-color": "#4f8d7f" } },
+        { selector: ".kind-financial", style: { "line-color": "#9d791e" } },
+        { selector: ".kind-medical", style: { "line-color": "#5369a5" } },
+        { selector: ".kind-legal", style: { "line-color": "#6f6288" } },
         { selector: ".status-inferred", style: { "line-style": "dashed" } },
         { selector: ".status-disputed", style: { "line-style": "dotted", width: 2.6 } },
         { selector: ".is-selected", style: { "border-width": 4, "border-color": "#111827", "z-index": 10 } },

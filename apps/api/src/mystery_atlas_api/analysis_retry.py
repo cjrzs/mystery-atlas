@@ -4,7 +4,8 @@ import re
 
 from mystery_atlas_analyzer.contracts import AnalysisCheckpoint
 
-from .models import AnalysisJob, Edition, User, Work
+from .models import AnalysisJob, BookImport, Edition, User, Work
+from .parsers import EPUB_PARSER_VERSION
 
 
 def can_manage_analysis(
@@ -77,6 +78,30 @@ def can_restart_from_beginning(job: AnalysisJob) -> bool:
     if can_retry_from_checkpoint(job):
         return False
     return not checkpoint_has_data(checkpoint_for_job(job))
+
+
+def should_reparse_source(
+    job: AnalysisJob,
+    book_import: BookImport | None,
+) -> bool:
+    if book_import is None or book_import.source_format != "epub":
+        return False
+    if book_import.parser_version != EPUB_PARSER_VERSION:
+        return True
+    if not book_import.structure_version:
+        return True
+    if failed_stage(job) == "source_validation":
+        return True
+    error = (job.error or "").casefold()
+    return any(
+        marker in error
+        for marker in (
+            "chapter structure",
+            "parsed chapter",
+            "章节结构",
+            "目录定位",
+        )
+    )
 
 
 def analysis_retry_hint(

@@ -96,7 +96,11 @@ def get_work(slug: str, session: Session = Depends(get_session)) -> WorkSummary:
     return demo
 
 
-@router.get("/{slug}/reader", response_model=ReaderResponse)
+@router.get(
+    "/{slug}/reader",
+    response_model=ReaderResponse,
+    response_model_exclude_unset=True,
+)
 def get_reader(
     slug: str,
     edition_id: str | None = None,
@@ -138,6 +142,11 @@ def get_reader(
             ensure_chapter_blocks(chapter, source_format=book_import.source_format)
             for chapter in book_import.chapters
         ],
+        structure_version=book_import.structure_version or "",
+        structure_source=book_import.structure_source or "",
+        structure_confidence=book_import.structure_confidence,
+        structure_warnings=list(book_import.structure_warnings or []),
+        structure_requires_review=book_import.structure_requires_review,
     )
 
 

@@ -88,6 +88,20 @@ test("import confirmation only asks for archive type after AI metadata preparse"
   );
 });
 
+test("low-confidence EPUB structure can be reviewed without losing source blocks", async () => {
+  const importPage = await source("apps/web/src/app/library/import/page.tsx");
+  const apiTypes = await source("apps/web/src/lib/api.ts");
+
+  assert.match(apiTypes, /structure_requires_review:\s*boolean/);
+  assert.match(apiTypes, /blocks\?:\s*ReaderBlock\[]/);
+  assert.match(importPage, /请复核章节结构/);
+  assert.match(importPage, /并入上一章/);
+  assert.match(importPage, /从“\{heading\.title\}”处分拆/);
+  assert.match(importPage, /`\/imports\/\$\{item\.id\}\/structure`/);
+  assert.match(importPage, /method:\s*"PUT"/);
+  assert.match(importPage, /保存结构并继续/);
+});
+
 test("workbench analysis consoles use the selected book instead of demo fixtures", async () => {
   const workbench = await source("apps/web/src/components/workbench.tsx");
   const apiTypes = await source("apps/web/src/lib/api.ts");
@@ -101,14 +115,19 @@ test("workbench analysis consoles use the selected book instead of demo fixtures
   assert.match(apiTypes, /can_retry:\s*boolean/);
   assert.match(apiTypes, /can_restart:\s*boolean/);
   assert.match(apiTypes, /retry_hint:\s*string/);
-  assert.match(workbench, /`\/analysis-jobs\/\$\{analysis\.job_id\}\/retry-stage`/);
-  assert.match(workbench, /`\/analysis-jobs\/\$\{analysis\.job_id\}\/restart`/);
+  assert.match(workbench, /`\/analysis-jobs\/\$\{analysis\.job_id\}\/retry`/);
   assert.match(workbench, /analysis\?\.can_manage_retry/);
-  assert.match(workbench, /analysis\.can_retry \|\| analysis\.can_restart/);
-  assert.match(workbench, /window\.confirm/);
-  assert.match(workbench, /重试失败阶段/);
-  assert.match(workbench, /从头重新分析/);
+  assert.match(workbench, /重新分析/);
+  const retryHandler = workbench.slice(
+    workbench.indexOf("const retryAnalysis"),
+    workbench.indexOf("const backHref"),
+  );
+  assert.doesNotMatch(retryHandler, /window\.confirm/);
+  assert.doesNotMatch(workbench, /重试失败阶段/);
+  assert.doesNotMatch(workbench, /从头重新分析/);
   assert.match(workbench, /analysis\?\.retry_hint/);
+  assert.doesNotMatch(workbench, /\/retry-stage/);
+  assert.doesNotMatch(workbench, /\/restart/);
   assert.doesNotMatch(workbench, /\/analysis\/retry/);
   assert.doesNotMatch(workbench, /雾港钟楼|第二枚钟锤|沈砚|顾青禾/);
 });
@@ -136,10 +155,59 @@ test("reader preserves semantic blocks and exposes focus preferences", async () 
   assert.match(styles, /--reader-content-width/);
 });
 
+test("reader exposes a chapter directory and resets scroll after chapter changes", async () => {
+  const workbench = await source("apps/web/src/components/workbench.tsx");
+  const styles = await source("apps/web/src/app/globals.css");
+
+  assert.match(workbench, /readerTocOpen/);
+  assert.match(workbench, /aria-label="目录"/);
+  assert.match(workbench, /readerBook\?\.chapters\.map/);
+  assert.match(workbench, /ref=\{readerCopyRef\}/);
+  assert.match(
+    workbench,
+    /readerCopyRef\.current\?\.scrollTo\(\{[\s\S]*top:\s*0/,
+  );
+  assert.match(workbench, /structural_path:\s*item\.structural_path\s*\?\?\s*\[\]/);
+  assert.match(styles, /\.reader-toc\s*\{/);
+  assert.match(
+    styles,
+    /\.reader-toc-list button\s*\{[^}]*grid-template-columns:\s*minmax\(80px, 38%\) minmax\(0, 1fr\)/,
+  );
+  assert.match(
+    styles,
+    /\.reader-toc-list button span\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis/,
+  );
+});
+
 test("character graph is organized around structural core people", async () => {
   const graph = await source("apps/web/src/components/character-graph.tsx");
 
   assert.doesNotMatch(graph, /name:\s*["']circle["']/);
   assert.match(graph, /coreNodeIds/);
   assert.match(graph, /name:\s*["']cose["']/);
+});
+
+test("character graph system labels are normalized and displayed in Chinese", async () => {
+  const graph = await source("apps/web/src/components/character-graph.tsx");
+  const labels = await source("apps/web/src/lib/graph-labels.ts");
+  const workbench = await source("apps/web/src/components/workbench.tsx");
+
+  assert.match(labels, /professional:\s*"职业"/);
+  assert.match(labels, /unknown:\s*"其他关系"/);
+  assert.match(labels, /confirmed:\s*"已确认"/);
+  assert.match(graph, /relationCategory\(edge\.kind\)/);
+  assert.match(workbench, /relationKindGroups/);
+  assert.match(workbench, /relationKindName\(category\)/);
+  assert.doesNotMatch(workbench, /relationKindNames\[kind\]\s*\?\?\s*kind/);
+});
+
+test("workbench console text is larger without overriding reader copy preferences", async () => {
+  const graph = await source("apps/web/src/components/character-graph.tsx");
+  const styles = await source("apps/web/src/app/globals.css");
+
+  assert.match(graph, /"font-size":\s*14/);
+  assert.match(graph, /"font-size":\s*12/);
+  assert.match(styles, /\.relation-filters button\s*\{[\s\S]*font-size:\s*11px/);
+  assert.match(styles, /\.workbench-analysis-status small\s*\{[\s\S]*font-size:\s*11px/);
+  assert.match(styles, /\.reader-copy p\s*\{[\s\S]*font-size:\s*var\(--reader-font-size\)/);
 });

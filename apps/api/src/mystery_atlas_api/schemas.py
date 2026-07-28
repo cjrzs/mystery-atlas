@@ -55,6 +55,14 @@ class BookImportResponse(BaseModel):
     edition_id: str | None
     chapter_count: int
     chapters: list[dict]
+    language: str | None = None
+    parser_version: str | None = None
+    structure_version: str | None = None
+    structure_source: str | None = None
+    structure_confidence: str = "low"
+    structure_warnings: list[str] = Field(default_factory=list)
+    structure_tree: list[dict] = Field(default_factory=list)
+    structure_requires_review: bool = False
     preview: str
     error: str | None
 
@@ -84,9 +92,42 @@ class FinalizeImportRequest(BaseModel):
     rights_confirmed: bool = False
 
 
+class StructureSegmentRequest(BaseModel):
+    source_number: int = Field(ge=1)
+    start_block: int = Field(ge=0)
+    end_block: int = Field(ge=1)
+
+
+class StructureChapterRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    parent_path: list[str] = Field(default_factory=list, max_length=12)
+    segments: list[StructureSegmentRequest] = Field(min_length=1)
+
+
+class ReviewBookStructureRequest(BaseModel):
+    chapters: list[StructureChapterRequest] = Field(min_length=1, max_length=2000)
+
+
 class ReaderBlock(BaseModel):
-    type: Literal["paragraph", "heading", "quote", "divider", "pre"]
+    type: Literal[
+        "paragraph",
+        "heading",
+        "quote",
+        "divider",
+        "pre",
+        "figure",
+        "pagebreak",
+    ]
     text: str = ""
+    level: int | None = Field(default=None, ge=1, le=6)
+    semantic_type: str = ""
+    anchors: list[str] = Field(default_factory=list)
+    links: list[dict] = Field(default_factory=list)
+    src: str = ""
+    alt: str = ""
+    resource: str = ""
+    fragment: str = ""
+    missing: bool = False
 
 
 class ReaderChapter(BaseModel):
@@ -95,6 +136,12 @@ class ReaderChapter(BaseModel):
     text: str
     characters: int
     blocks: list[ReaderBlock] = Field(default_factory=list)
+    structural_path: list[str] = Field(default_factory=list)
+    content_type: str = "chapter"
+    source_locator: dict = Field(default_factory=dict)
+    structure_version: str = ""
+    structure_confidence: str = ""
+    structure_warnings: list[str] = Field(default_factory=list)
 
 
 class ReaderResponse(BaseModel):
@@ -107,6 +154,11 @@ class ReaderResponse(BaseModel):
     language: str
     visibility: str
     chapters: list[ReaderChapter]
+    structure_version: str = ""
+    structure_source: str = ""
+    structure_confidence: str = ""
+    structure_warnings: list[str] = Field(default_factory=list)
+    structure_requires_review: bool = False
 
 
 class LibraryItemResponse(BaseModel):

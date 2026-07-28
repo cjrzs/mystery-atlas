@@ -23,7 +23,16 @@ from mystery_atlas_analyzer.model_adapters import ModelResponseError, StaticMode
 from mystery_atlas_analyzer.repository import SQLAlchemyAnalysisRepository
 from mystery_atlas_analyzer.runner import run_analysis_job
 from mystery_atlas_analyzer.settings import AnalyzerSettings
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import (
+    Column,
+    DateTime,
+    MetaData,
+    String,
+    Table,
+    create_engine,
+    func,
+    select,
+)
 from sqlalchemy.orm import Session
 
 from mystery_atlas_api import analysis_dispatch
@@ -338,6 +347,45 @@ def test_repository_records_ai_request_heartbeat_metadata(
         assert job.stage_detail == "book_editorial"
         assert job.response_chars == 12_345
         assert job.content_idle_seconds == 7
+
+
+def test_repository_heartbeat_is_best_effort_before_heartbeat_migration(
+    local_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = local_tmp_path / "pre-heartbeat-migration.db"
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    metadata = MetaData()
+    jobs = Table(
+        "analysis_jobs",
+        metadata,
+        Column("id", String(36), primary_key=True),
+        Column("updated_at", DateTime(timezone=True)),
+    )
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(jobs.insert().values(id="legacy-job"))
+
+    monkeypatch.setattr(
+        SQLAlchemyAnalysisRepository,
+        "REQUIRED_TABLES",
+        {"analysis_jobs"},
+    )
+    repository = SQLAlchemyAnalysisRepository(engine=engine)
+
+    repository.heartbeat_job(
+        "legacy-job",
+        call_id="call-legacy",
+        task="segment_analysis",
+        response_chars=512,
+        content_idle_seconds=3,
+    )
+
+    with engine.connect() as connection:
+        updated_at = connection.execute(
+            select(jobs.c.updated_at).where(jobs.c.id == "legacy-job")
+        ).scalar_one()
+    assert updated_at is not None
 
 
 def test_stale_running_jobs_become_failed_without_losing_their_stage(

@@ -780,7 +780,12 @@ def _segment_prompt(
     text: str,
 ) -> str:
     return (
-        "Analyze only the supplied book segment. Preserve the source language. "
+        "Analyze only the supplied book segment. Use the source language only for "
+        "person names and exact citation excerpts. "
+        "Write all reader-facing analysis in Simplified Chinese, including person "
+        "roles, descriptions, and relation labels. Preserve person names and exact "
+        "citation excerpts in their original script. Relation kind must use one of "
+        "the stable enum codes from the response schema. "
         "Separate explicit author statements from your inferences. Every factual "
         "finding must carry a short verbatim excerpt copied from this segment. "
         "Do not infer facts from later chapters. Citation.chapter must equal the "
@@ -788,6 +793,7 @@ def _segment_prompt(
         "(for example, '第三章' or 'Chapter 3'), chapter_title must be a concise, "
         "source-grounded descriptive subtitle. Otherwise preserve the source title."
         f"\n\nBook: {book.title}\nAuthor: {book.author}\n"
+        f"Structural path: {' > '.join(chapter.structural_path)}\n"
         f"Chapter: {chapter.number} - {chapter.title}\n"
         f"Segment: {segment_number}, chapter character offset: {segment_start}\n"
         "<source>\n"
@@ -848,7 +854,9 @@ def _synthesize_chapter(
     prompt = (
         "Merge the segment analyses into one chapter analysis. Deduplicate people, "
         "events, claims, and evidence. Retain exact source excerpts and do not add "
-        "facts absent from the segment analyses.\n\n"
+        "facts absent from the segment analyses. Keep every reader-facing field in "
+        "Simplified Chinese, while preserving person names and verbatim citations. "
+        "Relation kind must remain a stable enum code from the response schema.\n\n"
         f"Chapter {chapter.number}: {chapter.title}\n"
         f"{json.dumps([item.model_dump(mode='json') for item in segments], ensure_ascii=False)}"
     )
@@ -875,18 +883,43 @@ def _synthesize_parts(
     adapter: ModelAdapter,
     config: PipelineConfig,
     chapters: list[ChapterAnalysis],
+    source_chapters: dict[int, SourceChapter],
+    on_batch_completed: Callable[[int, int], None] | None = None,
 ) -> list[PartSynthesis]:
-    batches = [
-        chapters[start : start + config.chapters_per_batch]
-        for start in range(0, len(chapters), config.chapters_per_batch)
-    ]
+    batches: list[list[ChapterAnalysis]] = []
+    current: list[ChapterAnalysis] = []
+    current_parent: tuple[str, ...] | None = None
+    for chapter in chapters:
+        source = source_chapters.get(chapter.chapter_number)
+        parent = (
+            tuple(source.structural_path[:-1])
+            if source and len(source.structural_path) > 1
+            else None
+        )
+        if current and (
+            parent != current_parent
+            or len(current) >= config.chapters_per_batch
+        ):
+            batches.append(current)
+            current = []
+        current.append(chapter)
+        current_parent = parent
+    if current:
+        batches.append(current)
 
     def synthesize_batch(batch: list[ChapterAnalysis]) -> PartSynthesis:
+        first_source = source_chapters.get(batch[0].chapter_number)
+        parent_path = (
+            first_source.structural_path[:-1]
+            if first_source and len(first_source.structural_path) > 1
+            else []
+        )
         prompt = (
             "Synthesize this consecutive group of chapter analyses. Preserve "
             "citations inside timeline events and claims. Identify cross-chapter "
             "development, contradictions, foreshadowing, and unresolved questions. "
             "Do not resolve anything using chapters outside this group.\n\n"
+            f"Structural group: {' > '.join(parent_path) or 'automatic batch'}\n"
             f"{json.dumps([_compact_chapter(item) for item in batch], ensure_ascii=False)}"
         )
         part = adapter.generate(
@@ -900,13 +933,54 @@ def _synthesize_parts(
             update={"chapter_numbers": [item.chapter_number for item in batch]}
         )
 
+    def synthesize_adaptively(
+        batch: list[ChapterAnalysis],
+    ) -> list[PartSynthesis]:
+        try:
+            return [synthesize_batch(batch)]
+        except (ModelOutputTruncatedError, ModelContentIdleError) as exc:
+            if len(batch) == 1:
+                raise
+            midpoint = len(batch) // 2
+            logger.warning(
+                "AI batch split task=part_synthesis chapters=%d-%d "
+                "batch_size=%d error_type=%s",
+                batch[0].chapter_number,
+                batch[-1].chapter_number,
+                len(batch),
+                type(exc).__name__,
+            )
+            return [
+                *synthesize_adaptively(batch[:midpoint]),
+                *synthesize_adaptively(batch[midpoint:]),
+            ]
+
     if config.max_concurrency == 1 or len(batches) == 1:
-        return [synthesize_batch(batch) for batch in batches]
+        grouped_parts: list[list[PartSynthesis]] = []
+        for completed, batch in enumerate(batches, start=1):
+            grouped_parts.append(synthesize_adaptively(batch))
+            if on_batch_completed:
+                on_batch_completed(completed, len(batches))
+        return [part for group in grouped_parts for part in group]
+
+    ordered_groups: dict[int, list[PartSynthesis]] = {}
     with ThreadPoolExecutor(
         max_workers=min(config.max_concurrency, len(batches)),
         thread_name_prefix="analysis-part",
     ) as executor:
-        return list(executor.map(synthesize_batch, batches))
+        futures = {
+            executor.submit(synthesize_adaptively, batch): index
+            for index, batch in enumerate(batches)
+        }
+        for completed, future in enumerate(as_completed(futures), start=1):
+            ordered_groups[futures[future]] = future.result()
+            if on_batch_completed:
+                on_batch_completed(completed, len(batches))
+    return [
+        part
+        for index in range(len(batches))
+        for part in ordered_groups[index]
+    ]
 
 
 def _analyze_source_chapter(
@@ -1563,7 +1637,19 @@ def analyze_book(
     parts = active_checkpoint.parts
     if not parts:
         _notify(on_progress, "book_synthesis", 55, "synthesizing chapter groups")
-        parts = _synthesize_parts(adapter, config, ordered_chapters)
+        source_chapters = {chapter.number: chapter for chapter in book.chapters}
+        parts = _synthesize_parts(
+            adapter,
+            config,
+            ordered_chapters,
+            source_chapters,
+            on_batch_completed=lambda completed, total: _notify(
+                on_progress,
+                "book_synthesis",
+                55 + round(completed / total * 9),
+                f"{completed}/{total} chapter groups synthesized",
+            ),
+        )
         save_checkpoint(parts=parts)
 
     source_chapters = {chapter.number: chapter for chapter in book.chapters}
@@ -1589,6 +1675,14 @@ def analyze_book(
             def save_claim_batch(key: str, result: ClaimMergeResult) -> None:
                 claim_batches[key] = result
                 save_checkpoint(claim_merge_batches=dict(claim_batches))
+                completed = len(claim_batches)
+                batch_label = "batch" if completed == 1 else "batches"
+                _notify(
+                    on_progress,
+                    "book_synthesis",
+                    min(69, 65 + completed),
+                    f"{completed} claim {batch_label} merged",
+                )
 
             claims, claim_contradictions, claim_uncertainties = (
                 _merge_claims_adaptively(
@@ -1633,6 +1727,21 @@ def analyze_book(
             def save_editorial_section(key: str, result: BaseModel) -> None:
                 editorial_sections[key] = result
                 save_checkpoint(**{f"editorial_{key}": result})
+                _notify(
+                    on_progress,
+                    "book_synthesis",
+                    min(77, 71 + len(editorial_sections) * 2),
+                    f"{len(editorial_sections)}/3 reader report sections generated",
+                )
+
+            def mark_editorial_split() -> None:
+                save_checkpoint(editorial_split=True)
+                _notify(
+                    on_progress,
+                    "book_synthesis",
+                    71,
+                    "large reader report split into 3 sections",
+                )
 
             editorial = _generate_editorial_adaptively(
                 adapter,
@@ -1645,7 +1754,7 @@ def analyze_book(
                 ),
                 split_mode=active_checkpoint.editorial_split,
                 cached_sections=editorial_sections,
-                on_split=lambda: save_checkpoint(editorial_split=True),
+                on_split=mark_editorial_split,
                 on_section=save_editorial_section,
             )
             save_checkpoint(editorial=editorial)
@@ -1700,6 +1809,14 @@ def analyze_book(
             def save_audit_batch(key: str, result: ClaimAuditResult) -> None:
                 audit_batches[key] = result
                 save_checkpoint(claim_audit_batches=dict(audit_batches))
+                completed = len(audit_batches)
+                batch_label = "batch" if completed == 1 else "batches"
+                _notify(
+                    on_progress,
+                    "full_book_reconciliation",
+                    min(91, 82 + completed),
+                    f"{completed} claim audit {batch_label} completed",
+                )
 
             reconciliation = _audit_claims_adaptively(
                 adapter,

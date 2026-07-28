@@ -1132,6 +1132,52 @@ kbd {
 .import-progress > span { color: var(--muted); font-size: 8px; text-align: right; }
 .import-record > p { align-items: center; color: var(--muted); display: flex; font-size: 9px; gap: 5px; margin: 9px 0 0; }
 
+.structure-review {
+  background: color-mix(in srgb, var(--surface-muted) 70%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin-top: 12px;
+  padding: 12px;
+}
+
+.structure-review-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+}
+
+.structure-review-heading > svg { color: var(--red); flex: 0 0 auto; }
+.structure-review-heading strong,
+.structure-review-heading span { display: block; }
+.structure-review-heading strong { font-size: 10px; }
+.structure-review-heading span { color: var(--muted); font-size: 9px; line-height: 1.6; margin-top: 3px; }
+.structure-review > ul { color: var(--muted); font-size: 9px; margin: 9px 0; padding-left: 18px; }
+
+.structure-chapter-list {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0;
+  max-height: 440px;
+  overflow: auto;
+}
+
+.structure-chapter-row {
+  align-items: end;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  display: grid;
+  gap: 7px;
+  grid-template-columns: 26px minmax(130px, 0.8fr) minmax(160px, 1fr);
+  padding: 8px;
+}
+
+.structure-chapter-row > span { color: var(--muted); font-size: 9px; text-align: center; }
+.structure-chapter-row label { color: var(--muted); display: grid; font-size: 8px; gap: 4px; }
+.structure-chapter-row input { background: var(--surface); border: 1px solid var(--line); border-radius: 3px; color: var(--text); font: inherit; min-width: 0; padding: 6px 7px; }
+.structure-chapter-actions { display: flex; flex-wrap: wrap; gap: 5px; grid-column: 2 / -1; }
+.structure-chapter-actions button { background: transparent; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); cursor: pointer; font-size: 8px; padding: 4px 6px; }
+.structure-review > .primary-command { margin-top: 3px; }
+
 .import-result { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 9px; }
 .import-result > span { color: var(--teal); font-size: 9px; font-weight: 700; }
 .import-result p { color: var(--muted); display: -webkit-box; font-family: Georgia, "Songti SC", serif; font-size: 9px; line-height: 1.6; margin: 7px 0 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
@@ -1447,6 +1493,7 @@ kbd {
 /* Workbench */
 
 .workbench-shell {
+  font-size: 12px;
   height: 100vh;
   overflow: hidden;
 }
@@ -1513,12 +1560,12 @@ kbd {
 }
 
 .work-title strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .work-title span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   margin-top: 3px;
 }
 
@@ -1537,7 +1584,7 @@ kbd {
   align-items: center;
   color: var(--muted);
   display: flex;
-  font-size: 10px;
+  font-size: 12px;
   gap: 5px;
   white-space: nowrap;
 }
@@ -1549,7 +1596,7 @@ kbd {
 }
 
 .chapter-horizon strong {
-  font-size: 11px;
+  font-size: 12px;
   min-width: 54px;
 }
 
@@ -1560,7 +1607,7 @@ kbd {
   border-radius: 4px;
   color: var(--muted);
   display: inline-flex;
-  font-size: 10px;
+  font-size: 11px;
   gap: 5px;
   height: 30px;
   padding: 0 8px;
@@ -1666,12 +1713,12 @@ kbd {
 }
 
 .panel-heading strong {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .panel-heading span {
   color: #7c776e;
-  font-size: 9px;
+  font-size: 11px;
   margin-left: 4px;
 }
 
@@ -1704,7 +1751,7 @@ kbd {
 .reader-settings label span,
 .reader-settings output {
   color: inherit;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .reader-settings output {
@@ -1730,7 +1777,7 @@ kbd {
   border-radius: 6px;
   color: inherit;
   display: flex;
-  font-size: 9px;
+  font-size: 11px;
   gap: 6px;
   justify-content: center;
   min-height: 30px;
@@ -1752,6 +1799,79 @@ kbd {
 .reader-theme-swatch.light { background: #fff; }
 .reader-theme-swatch.sepia { background: #f6f0e3; }
 .reader-theme-swatch.dark { background: #202321; }
+
+.reader-toc {
+  background: inherit;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.reader-toc > header {
+  align-items: center;
+  border-bottom: 1px solid #e1ded6;
+  display: flex;
+  justify-content: space-between;
+  min-height: 46px;
+  padding: 0 14px;
+}
+
+.reader-toc > header strong {
+  font-size: 13px;
+}
+
+.reader-toc > header span {
+  color: #8a857c;
+  font-size: 11px;
+}
+
+.reader-toc-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  scrollbar-width: thin;
+}
+
+.reader-toc-list button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: inherit;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(80px, 38%) minmax(0, 1fr);
+  padding: 10px;
+  text-align: left;
+  width: 100%;
+}
+
+.reader-toc-list button:hover {
+  background: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+.reader-toc-list button.active {
+  background: #e6e0d3;
+  color: #2f5a52;
+}
+
+.reader-toc-list button span {
+  color: #8a857c;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-toc-list button strong {
+  font-family: Georgia, "Songti SC", serif;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .reader-chapter-nav {
   align-items: center;
@@ -1780,12 +1900,12 @@ kbd {
 
 .reader-chapter-nav span {
   color: #8a857c;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .reader-chapter-nav strong {
   font-family: Georgia, "Songti SC", serif;
-  font-size: 12px;
+  font-size: 13px;
   margin-top: 2px;
 }
 
@@ -1825,6 +1945,50 @@ kbd {
 .reader-copy p.reader-block.chinese {
   margin-bottom: 0.55em;
   text-indent: 2em;
+}
+
+.reader-structure-path {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.5rem;
+  text-align: center;
+}
+
+.reader-copy p.reader-note {
+  border-left: 2px solid var(--line);
+  color: var(--muted);
+  font-size: calc(var(--reader-font-size) * 0.86);
+  margin-top: 1rem;
+  padding-left: 1rem;
+  text-indent: 0;
+}
+
+.reader-figure {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-bottom: 1.5rem;
+  min-height: 96px;
+  padding: 1rem;
+}
+
+.reader-figure > div {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.reader-figure figcaption {
+  font-size: 12px;
+}
+
+.reader-pagebreak {
+  display: block;
 }
 
 .reader-section-heading {
@@ -1870,8 +2034,14 @@ kbd {
 
 .reader-theme-dark .panel-heading,
 .reader-theme-dark .reader-chapter-nav,
-.reader-theme-dark .reader-settings {
+.reader-theme-dark .reader-settings,
+.reader-theme-dark .reader-toc > header {
   border-color: #414642;
+}
+
+.reader-theme-dark .reader-toc-list button.active {
+  background: #343a36;
+  color: #9dd2c5;
 }
 
 .reader-theme-dark .panel-heading span,
@@ -1890,7 +2060,7 @@ kbd {
   border-top: 1px solid #e1ded6;
   color: #8a857c;
   display: flex;
-  font-size: 9px;
+  font-size: 11px;
   justify-content: space-between;
   min-height: 31px;
   padding: 9px 14px;
@@ -1925,7 +2095,7 @@ kbd {
 .workbench-analysis-status > div:first-child {
   align-items: center;
   display: flex;
-  font-size: 9px;
+  font-size: 11px;
   justify-content: space-between;
 }
 
@@ -1940,11 +2110,12 @@ kbd {
   gap: 9px;
 }
 
-.workbench-analysis-actions button {
+.workbench-analysis-actions button,
+.workbench-analysis-actions a {
   background: transparent;
   border: 0;
   color: var(--teal);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   padding: 0;
 }
@@ -1959,7 +2130,7 @@ kbd {
 }
 
 .workbench-analysis-status small {
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .workbench-empty {
@@ -1983,7 +2154,7 @@ kbd {
 .reader-copy .workbench-empty p {
   color: var(--muted);
   font-family: inherit;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.6;
   margin: 8px 0 0;
   max-width: 420px;
@@ -2003,7 +2174,7 @@ kbd {
   border-bottom: 2px solid transparent;
   color: var(--muted);
   display: flex;
-  font-size: 10px;
+  font-size: 12px;
   gap: 5px;
   padding: 0 10px;
   white-space: nowrap;
@@ -2046,11 +2217,11 @@ kbd {
 
 .graph-context > div:first-child span {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .graph-context > div:first-child strong {
-  font-size: 10px;
+  font-size: 12px;
   margin-top: 2px;
 }
 
@@ -2067,8 +2238,8 @@ kbd {
   border: 1px solid transparent;
   border-radius: 3px;
   color: var(--muted);
-  font-size: 8px;
-  height: 23px;
+  font-size: 11px;
+  height: 28px;
   padding: 0 7px;
   white-space: nowrap;
 }
@@ -2079,10 +2250,20 @@ kbd {
 }
 
 .relation-filters .relation-family.active { color: var(--blue); }
+.relation-filters .relation-romantic.active { color: var(--purple); }
+.relation-filters .relation-friendship.active { color: var(--teal); }
+.relation-filters .relation-professional.active { color: var(--blue); }
+.relation-filters .relation-social.active { color: var(--yellow); }
+.relation-filters .relation-investigation.active { color: var(--teal); }
 .relation-filters .relation-testimony.active { color: var(--yellow); }
 .relation-filters .relation-conflict.active { color: var(--red); }
+.relation-filters .relation-crime.active { color: var(--red); }
 .relation-filters .relation-action.active { color: var(--teal); }
 .relation-filters .relation-suspicion.active { color: var(--purple); }
+.relation-filters .relation-care.active { color: var(--teal); }
+.relation-filters .relation-financial.active { color: var(--yellow); }
+.relation-filters .relation-medical.active { color: var(--blue); }
+.relation-filters .relation-legal.active { color: var(--purple); }
 
 .character-graph {
   height: 100%;
@@ -2108,7 +2289,7 @@ kbd {
   align-items: center;
   color: var(--muted);
   display: flex;
-  font-size: 8px;
+  font-size: 11px;
   gap: 4px;
 }
 
@@ -2143,7 +2324,7 @@ kbd {
   border-bottom: 2px solid transparent;
   color: var(--muted);
   display: flex;
-  font-size: 10px;
+  font-size: 12px;
   gap: 4px;
   justify-content: center;
   padding: 0 11px;
@@ -2157,7 +2338,7 @@ kbd {
 .inspector-tabs button span {
   background: var(--surface-muted);
   border-radius: 8px;
-  font-size: 8px;
+  font-size: 11px;
   padding: 1px 5px;
 }
 
@@ -2200,7 +2381,7 @@ kbd {
 
 .entity-heading span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .entity-heading h2 {
@@ -2210,7 +2391,7 @@ kbd {
 
 .entity-description {
   color: #53606b;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.7;
   margin: 16px 0;
 }
@@ -2220,7 +2401,7 @@ kbd {
   background: var(--surface-muted);
   border-radius: 4px;
   display: flex;
-  font-size: 9px;
+  font-size: 11px;
   justify-content: space-between;
   padding: 9px 10px;
 }
@@ -2252,14 +2433,14 @@ kbd {
 .detail-section h3 {
   align-items: center;
   display: flex;
-  font-size: 10px;
+  font-size: 12px;
   justify-content: space-between;
   margin: 0 0 10px;
 }
 
 .detail-section h3 span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 500;
 }
 
@@ -2267,7 +2448,7 @@ kbd {
   align-items: flex-start;
   color: #4e5964;
   display: flex;
-  font-size: 10px;
+  font-size: 11px;
   gap: 7px;
   line-height: 1.5;
   padding: 6px 0;
@@ -2294,10 +2475,20 @@ kbd {
 }
 
 .relation-mark.relation-family { background: var(--blue); }
+.relation-mark.relation-romantic { background: var(--purple); }
+.relation-mark.relation-friendship { background: var(--teal); }
+.relation-mark.relation-professional { background: var(--blue); }
+.relation-mark.relation-social { background: var(--yellow); }
+.relation-mark.relation-investigation { background: var(--teal); }
 .relation-mark.relation-testimony { background: var(--yellow); }
 .relation-mark.relation-conflict { background: var(--red); }
+.relation-mark.relation-crime { background: var(--red); }
 .relation-mark.relation-action { background: var(--teal); }
 .relation-mark.relation-suspicion { background: var(--purple); }
+.relation-mark.relation-care { background: var(--teal); }
+.relation-mark.relation-financial { background: var(--yellow); }
+.relation-mark.relation-medical { background: var(--blue); }
+.relation-mark.relation-legal { background: var(--purple); }
 
 .relation-row strong,
 .relation-row small {
@@ -2305,12 +2496,12 @@ kbd {
 }
 
 .relation-row strong {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .relation-row small {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 11px;
   margin-top: 3px;
 }
 
@@ -2318,7 +2509,7 @@ kbd {
   align-items: center;
   color: var(--muted);
   display: flex;
-  font-size: 9px;
+  font-size: 11px;
   gap: 6px;
   margin-bottom: 16px;
 }
@@ -2335,19 +2526,19 @@ kbd {
 .relation-title strong {
   background: var(--surface-muted);
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 13px;
   padding: 10px 5px;
 }
 
 .relation-title span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .evidence-quote {
   border-left: 2px solid var(--yellow);
   color: #505b65;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.6;
   margin: 0;
   padding-left: 10px;
@@ -2361,7 +2552,7 @@ kbd {
   color: var(--teal);
   display: flex;
   flex: 0 0 42px;
-  font-size: 10px;
+  font-size: 12px;
   gap: 7px;
   padding: 0 12px;
   text-align: left;
@@ -2397,25 +2588,25 @@ kbd {
 
 .evidence-item small {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .evidence-item strong {
   display: block;
-  font-size: 11px;
+  font-size: 12px;
   margin-top: 8px;
 }
 
 .evidence-item p {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.55;
   margin: 5px 0 0;
 }
 
 .evidence-state {
   border-radius: 3px;
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 700;
   padding: 3px 5px;
 }
@@ -2449,8 +2640,8 @@ kbd {
   display: block;
 }
 
-.assistant-context strong { font-size: 10px; }
-.assistant-context span { color: var(--muted); font-size: 8px; margin-top: 2px; }
+.assistant-context strong { font-size: 12px; }
+.assistant-context span { color: var(--muted); font-size: 11px; margin-top: 2px; }
 
 .assistant-messages {
   display: flex;
@@ -2463,7 +2654,7 @@ kbd {
 
 .assistant-message {
   border-radius: 5px;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.6;
   max-width: 92%;
   padding: 9px 10px;
@@ -2492,7 +2683,7 @@ kbd {
   background: var(--surface-muted);
   border: 1px solid transparent;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 12px;
   height: 34px;
   outline: 0;
   padding: 0 9px;
@@ -2535,7 +2726,7 @@ kbd {
 
 .data-view-header span {
   color: var(--teal);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 800;
 }
 
@@ -2550,7 +2741,7 @@ kbd {
   border: 1px solid var(--line);
   border-radius: 4px;
   display: flex;
-  font-size: 9px;
+  font-size: 11px;
   gap: 5px;
   height: 29px;
   padding: 0 8px;
@@ -2574,7 +2765,7 @@ kbd {
 .timeline-marker span {
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .timeline-marker i {
@@ -2599,17 +2790,17 @@ kbd {
 
 .timeline-row small {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .timeline-row strong {
-  font-size: 12px;
+  font-size: 13px;
   margin-top: 5px;
 }
 
 .timeline-row p {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   margin: 5px 0 0;
 }
 
@@ -2638,21 +2829,21 @@ kbd {
 .chapter-item > span {
   color: var(--teal);
   display: block;
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 800;
 }
 
 .chapter-item strong,
 .clue-record h3 {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   margin: 8px 0;
 }
 
 .chapter-item p,
 .clue-record p {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.6;
   margin: 0;
 }
@@ -2661,7 +2852,7 @@ kbd {
   align-items: center;
   color: var(--teal);
   display: flex;
-  font-size: 8px;
+  font-size: 11px;
   gap: 4px;
   margin-top: 16px;
 }
@@ -2676,7 +2867,7 @@ kbd {
 .clue-record > div > span {
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .clue-record footer {
@@ -2687,7 +2878,7 @@ kbd {
 
 .clue-record footer span,
 .clue-record footer button {
-  font-size: 8px;
+  font-size: 11px;
 }
 
 .clue-record footer span { color: var(--muted); }

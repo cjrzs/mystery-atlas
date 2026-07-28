@@ -9,12 +9,16 @@ from sqlalchemy.orm import Session
 
 from ..analysis_dispatch import schedule_analysis
 from ..book_metadata import suggest_book_metadata
+from ..book_structure import (
+    apply_parsed_book,
+    apply_reviewed_structure,
+    sync_edition_chapters,
+)
 from ..config import get_settings
 from ..database import SessionLocal, get_session
 from ..models import (
     AnalysisJob,
     BookImport,
-    Chapter,
     Edition,
     PrivateLibraryBook,
     User,
@@ -22,7 +26,12 @@ from ..models import (
     utcnow,
 )
 from ..parsers import parse_book
-from ..schemas import AnalysisJobDetailResponse, BookImportResponse, FinalizeImportRequest
+from ..schemas import (
+    AnalysisJobDetailResponse,
+    BookImportResponse,
+    FinalizeImportRequest,
+    ReviewBookStructureRequest,
+)
 from ..security import get_current_user
 from ..tagging import normalize_book_tags
 
@@ -65,9 +74,7 @@ def parse_import_job(import_id: str) -> None:
             )
             book_import.stage = "detecting_metadata"
             book_import.progress = 80
-            book_import.chapters = parsed.chapters
-            book_import.chapter_count = len(parsed.chapters)
-            book_import.preview = parsed.preview
+            apply_parsed_book(book_import, parsed)
             session.commit()
 
             metadata = suggest_book_metadata(parsed)
@@ -79,7 +86,11 @@ def parse_import_job(import_id: str) -> None:
             book_import.detected_tags = metadata.tags
 
             book_import.status = "completed"
-            book_import.stage = "awaiting_confirmation"
+            book_import.stage = (
+                "structure_review_required"
+                if book_import.structure_requires_review
+                else "awaiting_confirmation"
+            )
             book_import.progress = 100
             session.commit()
         except Exception as exc:
@@ -165,6 +176,8 @@ def finalize_import(
         raise HTTPException(status_code=409, detail="文件尚未完成基础解析")
     if book_import.finalized_at is not None:
         return book_import
+    if book_import.structure_requires_review:
+        raise HTTPException(status_code=409, detail="请先复核并保存章节结构")
     if request.visibility == "public":
         if not user.email_verified or not user.can_publish:
             raise HTTPException(status_code=403, detail="当前账户不能公开上传")
@@ -242,27 +255,23 @@ def finalize_import(
         publisher=book_import.publisher.strip() if book_import.publisher else None,
         translator=book_import.translator.strip() if book_import.translator else None,
         isbn=isbn,
+        language=book_import.language or "zh-CN",
         source_format=book_import.source_format,
         content_fingerprint=book_import.content_hash,
         is_public_reference=request.visibility == "public",
         visibility=request.visibility,
         maintainer_id=user.id,
         rights_confirmed=request.rights_confirmed,
+        structure_version=book_import.structure_version,
     )
     session.add(edition)
     session.flush()
 
-    for index, item in enumerate(book_import.chapters):
-        parsed_locator = dict(item.get("source_locator") or {})
-        parsed_locator.update({"import_id": book_import.id, "index": index})
-        session.add(
-            Chapter(
-                edition_id=edition.id,
-                number=int(item.get("number", index + 1)),
-                title=str(item.get("title") or "")[:300],
-                source_locator=parsed_locator,
-            )
-        )
+    sync_edition_chapters(
+        session,
+        book_import=book_import,
+        edition=edition,
+    )
 
     library_item = PrivateLibraryBook(
         user_id=user.id,
@@ -277,13 +286,23 @@ def finalize_import(
         work_id=work.id,
         edition_id=edition.id,
         track="full",
-        stage="source_validation",
-        status="queued",
+        stage=(
+            "structure_review"
+            if book_import.structure_requires_review
+            else "source_validation"
+        ),
+        status=(
+            "waiting_structure_review"
+            if book_import.structure_requires_review
+            else "queued"
+        ),
         progress=0,
+        structure_version=book_import.structure_version,
     )
     session.add(analysis_job)
     session.flush()
-    schedule_analysis(analysis_job, background_tasks, get_settings())
+    if not book_import.structure_requires_review:
+        schedule_analysis(analysis_job, background_tasks, get_settings())
 
     book_import.detected_title = title
     book_import.detected_author = author
@@ -295,7 +314,70 @@ def finalize_import(
     book_import.work_id = work.id
     book_import.edition_id = edition.id
     book_import.finalized_at = utcnow()
-    book_import.stage = "ready_for_analysis"
+    book_import.stage = (
+        "structure_review_required"
+        if book_import.structure_requires_review
+        else "ready_for_analysis"
+    )
+    session.commit()
+    session.refresh(book_import)
+    return book_import
+
+
+@router.put("/{import_id}/structure", response_model=BookImportResponse)
+def review_import_structure(
+    import_id: str,
+    request: ReviewBookStructureRequest,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> BookImport:
+    book_import = session.get(BookImport, import_id)
+    if book_import is None or book_import.user_id != user.id:
+        raise HTTPException(status_code=404, detail="导入记录不存在")
+    if book_import.status != "completed":
+        raise HTTPException(status_code=409, detail="文件尚未完成基础解析")
+    if not book_import.structure_requires_review:
+        raise HTTPException(status_code=409, detail="当前章节结构不在待复核状态")
+
+    try:
+        apply_reviewed_structure(
+            book_import,
+            [chapter.model_dump() for chapter in request.chapters],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    book_import.stage = (
+        "ready_for_analysis"
+        if book_import.finalized_at is not None
+        else "awaiting_confirmation"
+    )
+    if book_import.edition_id is not None:
+        edition = session.get(Edition, book_import.edition_id)
+        if edition is None:
+            raise HTTPException(status_code=404, detail="书籍版本不存在")
+        edition.structure_version = book_import.structure_version
+        edition.revision += 1
+        sync_edition_chapters(
+            session,
+            book_import=book_import,
+            edition=edition,
+        )
+        job = session.scalar(
+            select(AnalysisJob)
+            .where(AnalysisJob.edition_id == edition.id)
+            .order_by(AnalysisJob.created_at.desc())
+        )
+        if job is not None:
+            job.structure_version = book_import.structure_version
+            job.result_summary = {}
+            schedule_analysis(job, background_tasks, get_settings())
+        work = session.get(Work, edition.work_id)
+        if work is not None:
+            work.status = "analyzing"
+            work.analysis_progress = 0
+
     session.commit()
     session.refresh(book_import)
     return book_import

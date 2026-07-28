@@ -120,12 +120,25 @@ class SQLAlchemyAnalysisRepository:
         chapter_values = _json_value(book_import["chapters"])
         if not isinstance(chapter_values, list) or not chapter_values:
             raise ValueError("imported book has no parsed chapters")
+        job_structure_version = str(job.get("structure_version") or "")
+        import_structure_version = str(book_import.get("structure_version") or "")
+        if (
+            job_structure_version
+            and import_structure_version
+            and job_structure_version != import_structure_version
+        ):
+            raise ValueError(
+                "analysis job is bound to an outdated chapter structure"
+            )
         chapters = [
             SourceChapter(
                 number=int(item.get("number", index + 1)),
                 title=str(item.get("title") or ""),
                 text=str(item.get("text") or ""),
                 source_locator=dict(item.get("source_locator") or {}),
+                structural_path=list(item.get("structural_path") or []),
+                content_type=str(item.get("content_type") or "chapter"),
+                structure_version=str(item.get("structure_version") or ""),
             )
             for index, item in enumerate(chapter_values)
             if isinstance(item, dict)
@@ -136,6 +149,7 @@ class SQLAlchemyAnalysisRepository:
             title=str(work["title"]),
             author=str(work["author"]),
             language=str(edition["language"] or "zh-CN"),
+            structure_version=import_structure_version,
             chapters=chapters,
         )
         result_summary = _json_value(job["result_summary"])
@@ -238,13 +252,23 @@ class SQLAlchemyAnalysisRepository:
         }
         if "updated_at" in jobs.c:
             values["updated_at"] = now
+        values = {name: value for name, value in values.items() if name in jobs.c}
         with self.engine.begin() as connection:
-            result = connection.execute(
-                update(jobs)
-                .where(jobs.c.id == job_id)
-                .values(**values)
-            )
-            if result.rowcount != 1:
+            if values:
+                result = connection.execute(
+                    update(jobs)
+                    .where(jobs.c.id == job_id)
+                    .values(**values)
+                )
+                exists = result.rowcount == 1
+            else:
+                exists = (
+                    connection.execute(
+                        select(jobs.c.id).where(jobs.c.id == job_id)
+                    ).scalar_one_or_none()
+                    is not None
+                )
+            if not exists:
                 raise LookupError(f"analysis job {job_id} does not exist")
 
     def _row_exists(self, connection: Any, table: Table, row_id: str) -> bool:

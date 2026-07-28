@@ -27,7 +27,21 @@ export type BookImport = {
   work_id: string | null;
   edition_id: string | null;
   chapter_count: number;
-  chapters: { number: number; title: string; characters: number }[];
+  chapters: {
+    number: number;
+    title: string;
+    characters: number;
+    structural_path?: string[];
+    blocks?: ReaderBlock[];
+  }[];
+  language: string | null;
+  parser_version: string | null;
+  structure_version: string | null;
+  structure_source: string | null;
+  structure_confidence: "high" | "medium" | "low";
+  structure_warnings: string[];
+  structure_tree: unknown[];
+  structure_requires_review: boolean;
   preview: string;
   error: string | null;
 };
@@ -75,11 +89,33 @@ export type ReaderChapter = {
   text: string;
   characters: number;
   blocks: ReaderBlock[];
+  structural_path: string[];
+  content_type: string;
+  source_locator: Record<string, unknown>;
+  structure_version: string;
+  structure_confidence: string;
+  structure_warnings: string[];
 };
 
 export type ReaderBlock = {
-  type: "paragraph" | "heading" | "quote" | "divider" | "pre";
+  type:
+    | "paragraph"
+    | "heading"
+    | "quote"
+    | "divider"
+    | "pre"
+    | "figure"
+    | "pagebreak";
   text: string;
+  level?: number | null;
+  semantic_type?: string;
+  anchors?: string[];
+  links?: Record<string, unknown>[];
+  src?: string;
+  alt?: string;
+  resource?: string;
+  fragment?: string;
+  missing?: boolean;
 };
 
 export type ReaderBook = {
@@ -92,6 +128,11 @@ export type ReaderBook = {
   language: string;
   visibility: string;
   chapters: ReaderChapter[];
+  structure_version: string;
+  structure_source: string;
+  structure_confidence: string;
+  structure_warnings: string[];
+  structure_requires_review: boolean;
 };
 
 export type ReaderPreferences = {

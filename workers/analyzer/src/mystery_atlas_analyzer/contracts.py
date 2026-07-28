@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar, get_args
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class SourceChapter(BaseModel):
@@ -11,6 +11,9 @@ class SourceChapter(BaseModel):
     title: str
     text: str
     source_locator: dict[str, Any] = Field(default_factory=dict)
+    structural_path: list[str] = Field(default_factory=list)
+    content_type: str = "chapter"
+    structure_version: str = ""
 
 
 class BookInput(BaseModel):
@@ -19,6 +22,7 @@ class BookInput(BaseModel):
     title: str
     author: str
     language: str = "zh-CN"
+    structure_version: str = ""
     chapters: list[SourceChapter] = Field(min_length=1)
 
 
@@ -50,14 +54,65 @@ class PersonFinding(BaseModel):
     citations: list[SourceCitation] = Field(default_factory=list)
 
 
+RelationKind = Literal[
+    "family",
+    "romantic",
+    "friendship",
+    "professional",
+    "social",
+    "investigation",
+    "conflict",
+    "crime",
+    "testimony",
+    "action",
+    "suspicion",
+    "care",
+    "financial",
+    "medical",
+    "legal",
+    "unknown",
+]
+
+_RELATION_KIND_ALIASES: dict[str, RelationKind] = {
+    "business": "professional",
+    "partnership": "professional",
+    "parent_child": "family",
+    "spouse": "family",
+    "marital": "family",
+    "marriage": "family",
+    "engagement": "family",
+    "romantic_interest": "romantic",
+    "emotional": "romantic",
+    "friend": "friendship",
+    "interrogation": "investigation",
+    "arrest": "investigation",
+    "accusation": "investigation",
+    "murder": "crime",
+    "killer_victim": "crime",
+    "attempted_murder": "crime",
+    "blackmail": "crime",
+    "suicide": "crime",
+    "suspected_murder": "crime",
+    "caretaker": "care",
+}
+_RELATION_KIND_VALUES = frozenset(get_args(RelationKind))
+
+
 class RelationFinding(BaseModel):
     source: str
     target: str
     label: str
-    kind: str = "unknown"
+    kind: RelationKind = "unknown"
     status: Literal["confirmed", "inferred", "disputed", "uncertain"] = "inferred"
     first_chapter: int = Field(ge=1)
     citations: list[SourceCitation] = Field(default_factory=list)
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def normalize_relation_kind(cls, value: Any) -> str:
+        normalized = str(value or "unknown").strip().casefold().replace(" ", "_")
+        normalized = _RELATION_KIND_ALIASES.get(normalized, normalized)
+        return normalized if normalized in _RELATION_KIND_VALUES else "unknown"
 
 
 class TimelineEvent(BaseModel):

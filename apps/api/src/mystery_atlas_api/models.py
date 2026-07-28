@@ -75,6 +75,7 @@ class Edition(TimestampMixin, Base):
     is_available: Mapped[bool] = mapped_column(default=True)
     rights_confirmed: Mapped[bool] = mapped_column(default=False)
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    structure_version: Mapped[str | None] = mapped_column(String(80), index=True)
 
 
 class Chapter(TimestampMixin, Base):
@@ -234,6 +235,7 @@ class AnalysisJob(TimestampMixin, Base):
     stage_detail: Mapped[str | None] = mapped_column(String(300))
     response_chars: Mapped[int] = mapped_column(Integer, default=0)
     content_idle_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    structure_version: Mapped[str | None] = mapped_column(String(80), index=True)
 
 
 class BookImport(TimestampMixin, Base):
@@ -262,6 +264,14 @@ class BookImport(TimestampMixin, Base):
     detected_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     chapter_count: Mapped[int] = mapped_column(Integer, default=0)
     chapters: Mapped[list] = mapped_column(JSON, default=list)
+    language: Mapped[str | None] = mapped_column(String(40))
+    parser_version: Mapped[str | None] = mapped_column(String(80), index=True)
+    structure_version: Mapped[str | None] = mapped_column(String(80), index=True)
+    structure_source: Mapped[str | None] = mapped_column(String(40))
+    structure_confidence: Mapped[str] = mapped_column(String(20), default="low")
+    structure_warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
+    structure_tree: Mapped[list] = mapped_column(JSON, default=list)
+    structure_requires_review: Mapped[bool] = mapped_column(default=False)
     preview: Mapped[str] = mapped_column(Text, default="")
     error: Mapped[str | None] = mapped_column(Text)
 

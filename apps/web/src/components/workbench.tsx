@@ -47,6 +47,13 @@ import {
   type ReaderPreferences,
   type WorkbenchAnalysis,
 } from "@/lib/api";
+import {
+  graphStatusName,
+  relationCategory,
+  relationCategoryOrder,
+  relationKindName,
+  type RelationCategory,
+} from "@/lib/graph-labels";
 
 type MainView = "graph" | "timeline" | "chapters" | "clues";
 type InspectorTab = "details" | "evidence" | "assistant";
@@ -61,17 +68,9 @@ const defaultReaderPreferences: ReaderPreferences = {
   theme: "sepia",
 };
 
-const relationKindNames: Record<string, string> = {
-  family: "亲属",
-  testimony: "证词",
-  conflict: "冲突",
-  action: "共同行动",
-  suspicion: "嫌疑",
-  unknown: "其他",
-};
-
 const statusNames: Record<string, string> = {
   waiting_configuration: "等待 AI 配置",
+  waiting_structure_review: "等待复核章节结构",
   queued: "等待分析",
   running: "分析中",
   completed: "分析完成",
@@ -81,6 +80,7 @@ const statusNames: Record<string, string> = {
 
 const stageNames: Record<string, string> = {
   waiting_for_ai_configuration: "等待 AI 配置",
+  structure_review: "复核章节结构",
   source_validation: "校验正文",
   segment_analysis: "逐章提取人物、事件与证据",
   chapter_synthesis: "合并章节分析",
@@ -104,6 +104,7 @@ export function Workbench({
   const [readerOpen, setReaderOpen] = useState(true);
   const [readerFocused, setReaderFocused] = useState(false);
   const [readerSettingsOpen, setReaderSettingsOpen] = useState(false);
+  const [readerTocOpen, setReaderTocOpen] = useState(false);
   const [readerPreferences, setReaderPreferences] =
     useState<ReaderPreferences>(defaultReaderPreferences);
   const [readerPreferencesOwner, setReaderPreferencesOwner] = useState("");
@@ -131,6 +132,7 @@ export function Workbench({
   const [analysisRefresh, setAnalysisRefresh] = useState(0);
   const [retryingAnalysis, setRetryingAnalysis] = useState(false);
   const analysisWorkId = useRef<string | null>(null);
+  const readerCopyRef = useRef<HTMLElement | null>(null);
   const currentPreferencesOwner = user?.id ?? "guest";
 
   useEffect(() => {
@@ -200,11 +202,12 @@ export function Workbench({
     apiRequest<ReaderBook>(path)
       .then(async (book) => {
         if (!active) return;
+        const normalizedBook = normalizeReaderBook(book);
         let startingChapter = 1;
-        if (user && book.visibility === "public" && !libraryItemId) {
+        if (user && normalizedBook.visibility === "public" && !libraryItemId) {
           try {
             const record = await apiRequest<LibraryItem>(
-              `/library/public/${book.edition_id}`,
+              `/library/public/${normalizedBook.edition_id}`,
               { method: "POST" },
             );
             if (!active) return;
@@ -214,12 +217,12 @@ export function Workbench({
             startingChapter = 1;
           }
         }
-        const maxChapter = Math.max(book.chapters.length, 1);
+        const maxChapter = Math.max(normalizedBook.chapters.length, 1);
         const boundedChapter = Math.max(
           1,
           Math.min(startingChapter, maxChapter),
         );
-        setReaderBook(book);
+        setReaderBook(normalizedBook);
         setReaderChapterNumber(boundedChapter);
         setChapter(boundedChapter);
         setReaderState("ready");
@@ -304,6 +307,10 @@ export function Workbench({
     "--reader-content-width": `${readerPreferences.content_width}px`,
   } as CSSProperties;
 
+  useEffect(() => {
+    readerCopyRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, [readerChapterNumber]);
+
   const selectedCharacter =
     selection?.type === "node"
       ? analysis?.graph.nodes.find((item) => item.id === selection.id)
@@ -312,12 +319,19 @@ export function Workbench({
     selection?.type === "edge"
       ? analysis?.graph.edges.find((item) => item.id === selection.id)
       : undefined;
-  const relationKinds = useMemo(
-    () => [
-      ...new Set((analysis?.graph.edges ?? []).map((item) => item.kind)),
-    ],
-    [analysis],
-  );
+  const relationKindGroups = useMemo(() => {
+    const grouped = new Map<RelationCategory, Set<string>>();
+    for (const edge of analysis?.graph.edges ?? []) {
+      const category = relationCategory(edge.kind);
+      const kinds = grouped.get(category) ?? new Set<string>();
+      kinds.add(edge.kind);
+      grouped.set(category, kinds);
+    }
+    return relationCategoryOrder.flatMap((category) => {
+      const kinds = grouped.get(category);
+      return kinds ? [{ category, kinds: [...kinds] }] : [];
+    });
+  }, [analysis]);
   const visibleEvidence = analysis?.evidence ?? [];
 
   const moveReader = (next: number) => {
@@ -341,11 +355,14 @@ export function Workbench({
     setInspectorTab("details");
   }, []);
 
-  const toggleRelationKind = (kind: string) => {
+  const toggleRelationKinds = (kinds: string[]) => {
     setVisibleKinds((current) => {
       const next = new Set(current);
-      if (next.has(kind)) next.delete(kind);
-      else next.add(kind);
+      const allVisible = kinds.every((kind) => next.has(kind));
+      for (const kind of kinds) {
+        if (allVisible) next.delete(kind);
+        else next.add(kind);
+      }
       return next;
     });
   };
@@ -392,25 +409,13 @@ export function Workbench({
   const retryAnalysis = async () => {
     if (
       !analysis?.job_id ||
-      !(analysis.can_retry || analysis.can_restart)
+      !analysis.can_manage_retry
     ) {
       return;
     }
-    const restartFromBeginning = !analysis.can_retry && analysis.can_restart;
-    if (
-      restartFromBeginning &&
-      !window.confirm(
-        "这条旧任务没有阶段检查点，只能从头重新分析，并会重新消耗 Token。确认继续吗？",
-      )
-    ) {
-      return;
-    }
-    const endpoint = restartFromBeginning
-      ? `/analysis-jobs/${analysis.job_id}/restart`
-      : `/analysis-jobs/${analysis.job_id}/retry-stage`;
     setRetryingAnalysis(true);
     try {
-      await apiRequest(endpoint, {
+      await apiRequest(`/analysis-jobs/${analysis.job_id}/retry`, {
         method: "POST",
       });
       setAnalysisRefresh((current) => current + 1);
@@ -534,11 +539,30 @@ export function Workbench({
             <div className="reader-heading-actions">
               <button
                 className={
+                  readerTocOpen
+                    ? "icon-button compact active"
+                    : "icon-button compact"
+                }
+                onClick={() => {
+                  setReaderTocOpen((current) => !current);
+                  setReaderSettingsOpen(false);
+                }}
+                type="button"
+                title="目录"
+                aria-label="目录"
+              >
+                <ListTree size={16} />
+              </button>
+              <button
+                className={
                   readerSettingsOpen
                     ? "icon-button compact active"
                     : "icon-button compact"
                 }
-                onClick={() => setReaderSettingsOpen((current) => !current)}
+                onClick={() => {
+                  setReaderSettingsOpen((current) => !current);
+                  setReaderTocOpen(false);
+                }}
                 type="button"
                 title="阅读设置"
               >
@@ -571,66 +595,113 @@ export function Workbench({
               )}
             </div>
           </div>
-          {readerSettingsOpen && (
-            <ReaderSettings
-              preferences={readerPreferences}
-              onChange={setReaderPreferences}
-            />
-          )}
-          <div className="reader-chapter-nav">
-            <button
-              disabled={!readerBook || readerChapterNumber <= 1}
-              onClick={() => moveReader(readerChapterNumber - 1)}
-              type="button"
-              aria-label="上一章"
-            >
-              <ChevronLeft size={16} />
-            </button>
-            <div>
-              <span>
-                {readerChapter ? `第 ${readerChapter.number} 章` : "—"}
-              </span>
-              <strong>
-                {readerChapter?.title ??
-                  (readerState === "loading" ? "正在读取…" : "无可读章节")}
-              </strong>
-            </div>
-            <button
-              disabled={
-                !readerBook || readerChapterNumber >= readerMaxChapter
-              }
-              onClick={() => moveReader(readerChapterNumber + 1)}
-              type="button"
-              aria-label="下一章"
-            >
-              <ChevronRight size={16} />
-            </button>
-          </div>
-          <article className="reader-copy">
-            {readerChapter ? (
-              <>
-                {readerChapter.title && <h1>{readerChapter.title}</h1>}
-                {readerBlocks.map((block, index) => (
-                  <ReaderBlockContent
-                    block={block}
-                    index={index}
-                    key={`${block.type}-${index}-${block.text.slice(0, 20)}`}
-                  />
+          {readerTocOpen ? (
+            <nav className="reader-toc" aria-label="目录">
+              <header>
+                <strong>目录</strong>
+                <span>{readerBook?.chapters.length ?? 0} 章</span>
+              </header>
+              <div className="reader-toc-list">
+                {readerBook?.chapters.map((item) => (
+                  <button
+                    aria-current={
+                      item.number === readerChapterNumber ? "page" : undefined
+                    }
+                    className={
+                      item.number === readerChapterNumber ? "active" : ""
+                    }
+                    key={item.number}
+                    onClick={() => {
+                      moveReader(item.number);
+                      setReaderTocOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <span
+                      title={
+                        item.structural_path.slice(0, -1).join(" › ") ||
+                        `第 ${item.number} 章`
+                      }
+                    >
+                      {item.structural_path.slice(0, -1).join(" › ") ||
+                        `第 ${item.number} 章`}
+                    </span>
+                    <strong>{item.title || `第 ${item.number} 章`}</strong>
+                  </button>
                 ))}
-              </>
-            ) : (
-              <EmptyMessage
-                title={
-                  readerState === "loading" ? "正在读取正文" : "正文暂不可用"
-                }
-                detail={
-                  readerState === "loading"
-                    ? "正在加载这本书的章节。"
-                    : readerError || "这本书还没有可用的正文版本。"
-                }
-              />
-            )}
-          </article>
+              </div>
+            </nav>
+          ) : (
+            <>
+              {readerSettingsOpen && (
+                <ReaderSettings
+                  preferences={readerPreferences}
+                  onChange={setReaderPreferences}
+                />
+              )}
+              <div className="reader-chapter-nav">
+                <button
+                  disabled={!readerBook || readerChapterNumber <= 1}
+                  onClick={() => moveReader(readerChapterNumber - 1)}
+                  type="button"
+                  aria-label="上一章"
+                >
+                  <ChevronLeft size={16} />
+                </button>
+                <div>
+                  <span>
+                    {readerChapter ? `第 ${readerChapter.number} 章` : "—"}
+                  </span>
+                  <strong>
+                    {readerChapter?.title ??
+                      (readerState === "loading" ? "正在读取…" : "无可读章节")}
+                  </strong>
+                </div>
+                <button
+                  disabled={
+                    !readerBook || readerChapterNumber >= readerMaxChapter
+                  }
+                  onClick={() => moveReader(readerChapterNumber + 1)}
+                  type="button"
+                  aria-label="下一章"
+                >
+                  <ChevronRight size={16} />
+                </button>
+              </div>
+              <article className="reader-copy" ref={readerCopyRef}>
+                {readerChapter ? (
+                  <>
+                    {readerChapter.structural_path.length > 1 && (
+                      <p className="reader-structure-path">
+                        {readerChapter.structural_path.slice(0, -1).join(" › ")}
+                      </p>
+                    )}
+                    {readerChapter.title && <h1>{readerChapter.title}</h1>}
+                    {readerBlocks.map((block, index) => (
+                      <ReaderBlockContent
+                        block={block}
+                        index={index}
+                        key={`${block.type}-${index}-${block.text.slice(0, 20)}`}
+                      />
+                    ))}
+                  </>
+                ) : (
+                  <EmptyMessage
+                    title={
+                      readerState === "loading"
+                        ? "正在读取正文"
+                        : "正文暂不可用"
+                    }
+                    detail={
+                      readerState === "loading"
+                        ? "正在加载这本书的章节。"
+                        : readerError || "这本书还没有可用的正文版本。"
+                    }
+                  />
+                )}
+              </article>
+            </>
+          )}
           <div className="reader-footer">
             <span>
               阅读进度{" "}
@@ -730,21 +801,21 @@ export function Workbench({
                   <span>当前作品</span>
                   <strong>{readerBook?.work_title ?? "—"}</strong>
                 </div>
-                {relationKinds.length > 0 && (
+                {relationKindGroups.length > 0 && (
                   <div className="relation-filters">
                     <Filter size={14} />
-                    {relationKinds.map((kind) => (
+                    {relationKindGroups.map(({ category, kinds }) => (
                       <button
-                        key={kind}
+                        key={category}
                         className={
-                          visibleKinds.has(kind)
-                            ? `relation-${kind} active`
+                          kinds.every((kind) => visibleKinds.has(kind))
+                            ? `relation-${category} active`
                             : ""
                         }
-                        onClick={() => toggleRelationKind(kind)}
+                        onClick={() => toggleRelationKinds(kinds)}
                         type="button"
                       >
-                        {relationKindNames[kind] ?? kind}
+                        {relationKindName(category)}
                       </button>
                     ))}
                   </div>
@@ -1008,6 +1079,17 @@ function normalizedReaderBlocks(
     .map((paragraph) => ({ type: "paragraph", text: paragraph }));
 }
 
+function normalizeReaderBook(book: ReaderBook): ReaderBook {
+  return {
+    ...book,
+    chapters: (book.chapters ?? []).map((item) => ({
+      ...item,
+      blocks: item.blocks ?? [],
+      structural_path: item.structural_path ?? [],
+    })),
+  };
+}
+
 function ReaderBlockContent({
   block,
   index,
@@ -1027,9 +1109,26 @@ function ReaderBlockContent({
   if (block.type === "pre") {
     return <pre className="reader-preformatted">{block.text}</pre>;
   }
+  if (block.type === "figure") {
+    return (
+      <figure className="reader-figure">
+        <div aria-hidden="true">图</div>
+        <figcaption>{block.alt || block.text || "原书插图"}</figcaption>
+      </figure>
+    );
+  }
+  if (block.type === "pagebreak") {
+    return (
+      <span
+        className="reader-pagebreak"
+        data-page-label={block.text}
+        aria-hidden="true"
+      />
+    );
+  }
   const languageClass = /[\u3400-\u9fff]/.test(block.text)
-    ? "reader-block chinese"
-    : "reader-block";
+    ? `reader-block chinese${block.semantic_type?.includes("note") ? " reader-note" : ""}`
+    : `reader-block${block.semantic_type?.includes("note") ? " reader-note" : ""}`;
   return (
     <p className={languageClass} data-reader-block={index + 1}>
       {block.text}
@@ -1131,23 +1230,22 @@ function AnalysisStatus({
       <div>
         <span>{status}</span>
         <span className="workbench-analysis-actions">
+          {analysis?.status === "waiting_structure_review" &&
+            analysis.can_manage_retry && (
+              <Link href="/library/import">复核章节结构</Link>
+            )}
           {(analysis?.status === "failed" ||
             analysis?.status === "waiting_configuration") &&
             analysis?.can_manage_retry &&
             analysis.job_id && (
               <button
-                disabled={
-                  retrying ||
-                  !(analysis.can_retry || analysis.can_restart)
-                }
+                disabled={retrying}
                 onClick={onRetry}
                 type="button"
               >
                 {retrying
                   ? "正在重新分析…"
-                  : analysis.can_retry
-                    ? "重试失败阶段"
-                    : "从头重新分析"}
+                  : "重新分析"}
               </button>
             )}
           <strong>{progress}%</strong>
@@ -1213,7 +1311,7 @@ function CharacterDetails({
         <span>身份状态</span>
         <strong>
           <i />
-          {character.group === "confirmed" ? "已确认" : character.group}
+          {graphStatusName(character.group)}
         </strong>
       </div>
       <section className="detail-section">
@@ -1228,18 +1326,14 @@ function CharacterDetails({
           return (
             <div className="relation-row" key={relation.id}>
               <span
-                className={`relation-mark relation-${relation.kind}`}
+                className={`relation-mark relation-${relationCategory(relation.kind)}`}
               />
               <div>
                 <strong>
                   {relation.label} · {names.get(otherId) ?? "未知人物"}
                 </strong>
                 <small>
-                  {relation.status === "confirmed"
-                    ? "已确认"
-                    : relation.status === "inferred"
-                      ? "推测"
-                      : "存疑"}{" "}
+                  {graphStatusName(relation.status)}{" "}
                   · 第 {relation.first_chapter} 章
                 </small>
               </div>
@@ -1275,11 +1369,7 @@ function RelationDetails({
         <span>关系状态</span>
         <strong>
           <i />
-          {relation.status === "confirmed"
-            ? "已确认"
-            : relation.status === "inferred"
-              ? "推测"
-              : "存疑"}
+          {graphStatusName(relation.status)}
         </strong>
       </div>
       <section className="detail-section">

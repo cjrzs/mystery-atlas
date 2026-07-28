@@ -831,12 +831,14 @@ def test_checkpointed_parts_use_compact_book_synthesis_and_claim_only_audit() ->
 
     adapter = CompactSynthesisAdapter()
     checkpoints: list[AnalysisCheckpoint] = []
+    progress_updates = []
     report = analyze_book(
         book,
         adapter,
         PipelineConfig(reading_model="reading", truth_model="truth"),
         checkpoint=AnalysisCheckpoint(chapters=[chapter], parts=[part]),
         on_checkpoint=checkpoints.append,
+        on_progress=progress_updates.append,
     )
 
     assert adapter.calls == [
@@ -854,6 +856,14 @@ def test_checkpointed_parts_use_compact_book_synthesis_and_claim_only_audit() ->
     assert report.reconciliation.final_claims == report.synthesis.claims
     assert any(item.book_claims is not None for item in checkpoints)
     assert any(item.editorial is not None for item in checkpoints)
+    assert any(
+        item.progress == 66 and item.detail == "1 claim batch merged"
+        for item in progress_updates
+    )
+    assert any(
+        item.progress == 83 and item.detail == "1 claim audit batch completed"
+        for item in progress_updates
+    )
 
 
 def test_editorial_truncation_falls_back_to_checkpointed_field_groups() -> None:
@@ -1372,6 +1382,138 @@ def test_pipeline_flags_a_model_excerpt_that_is_not_in_the_book() -> None:
     assert report.audit.coverage == 0
     assert report.audit.warnings
     assert report.evidence_index[0].citation.verified is False
+
+
+def test_part_synthesis_caps_batches_inside_one_structural_parent() -> None:
+    class BatchRecordingAdapter:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def generate(
+            self,
+            *,
+            task,
+            system,
+            prompt,
+            response_model,
+            model,
+            temperature=0.1,
+        ):
+            del system, response_model, model, temperature
+            assert task == "part_synthesis"
+            chapter_numbers = [
+                int(value)
+                for value in re.findall(r'"chapter_number":\s*(\d+)', prompt)
+            ]
+            self.batch_sizes.append(len(chapter_numbers))
+            return PartSynthesis(
+                chapter_numbers=[],
+                summary=f"Chapters {chapter_numbers[0]}-{chapter_numbers[-1]}",
+            )
+
+    adapter = BatchRecordingAdapter()
+    chapters = [
+        ChapterAnalysis(
+            chapter_number=number,
+            chapter_title=f"Chapter {number}",
+            summary=f"Summary {number}",
+        )
+        for number in range(1, 15)
+    ]
+    source_chapters = {
+        number: SourceChapter(
+            number=number,
+            title=f"Chapter {number}",
+            text=f"Source {number}",
+            structural_path=["Main text", f"Chapter {number}"],
+        )
+        for number in range(1, 15)
+    }
+
+    completed_batches: list[tuple[int, int]] = []
+    parts = pipeline._synthesize_parts(
+        adapter,
+        PipelineConfig(
+            reading_model="reading",
+            chapters_per_batch=6,
+            max_concurrency=1,
+        ),
+        chapters,
+        source_chapters,
+        on_batch_completed=lambda completed, total: completed_batches.append(
+            (completed, total)
+        ),
+    )
+
+    assert adapter.batch_sizes == [6, 6, 2]
+    assert completed_batches == [(1, 3), (2, 3), (3, 3)]
+    assert [number for part in parts for number in part.chapter_numbers] == list(
+        range(1, 15)
+    )
+
+
+def test_part_synthesis_splits_a_provider_truncated_batch() -> None:
+    class TruncatingPartAdapter:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def generate(
+            self,
+            *,
+            task,
+            system,
+            prompt,
+            response_model,
+            model,
+            temperature=0.1,
+        ):
+            del system, response_model, model, temperature
+            assert task == "part_synthesis"
+            chapter_numbers = [
+                int(value)
+                for value in re.findall(r'"chapter_number":\s*(\d+)', prompt)
+            ]
+            self.batch_sizes.append(len(chapter_numbers))
+            if len(chapter_numbers) > 2:
+                raise ModelOutputTruncatedError("provider length")
+            return PartSynthesis(
+                chapter_numbers=[],
+                summary=f"Chapters {chapter_numbers[0]}-{chapter_numbers[-1]}",
+            )
+
+    adapter = TruncatingPartAdapter()
+    chapters = [
+        ChapterAnalysis(
+            chapter_number=number,
+            chapter_title=f"Chapter {number}",
+            summary=f"Summary {number}",
+        )
+        for number in range(1, 9)
+    ]
+    source_chapters = {
+        number: SourceChapter(
+            number=number,
+            title=f"Chapter {number}",
+            text=f"Source {number}",
+        )
+        for number in range(1, 9)
+    }
+
+    parts = pipeline._synthesize_parts(
+        adapter,
+        PipelineConfig(
+            reading_model="reading",
+            chapters_per_batch=8,
+            max_concurrency=1,
+        ),
+        chapters,
+        source_chapters,
+    )
+
+    assert adapter.batch_sizes == [8, 4, 2, 2, 4, 2, 2]
+    assert [number for part in parts for number in part.chapter_numbers] == list(
+        range(1, 9)
+    )
 
 
 def test_pipeline_analyzes_chapters_with_bounded_concurrency() -> None:
