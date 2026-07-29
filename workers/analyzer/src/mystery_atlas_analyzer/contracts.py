@@ -317,10 +317,13 @@ class ChapterWorkCheckpoint(BaseModel):
     people_relations_batches: dict[str, ChapterPeopleRelationsResult] = Field(
         default_factory=dict
     )
+    people_relations_splits: set[str] = Field(default_factory=set)
     events_batches: dict[str, ChapterEventsResult] = Field(default_factory=dict)
+    events_splits: set[str] = Field(default_factory=set)
     interpretation_batches: dict[str, ChapterInterpretationResult] = Field(
         default_factory=dict
     )
+    interpretation_splits: set[str] = Field(default_factory=set)
 
 
 class AnalysisCheckpoint(BaseModel):

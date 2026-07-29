@@ -720,11 +720,7 @@ def _merge_verified_timeline(parts: list[PartSynthesis]) -> list[Any]:
 
 
 def _evidence_id(item: EvidenceFinding) -> str:
-    raw = (
-        f"{item.citation.chapter}|{item.citation.start_char}|"
-        f"{item.title}|{item.citation.excerpt}"
-    )
-    return f"ev-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
+    return _citation_id(item.citation)
 
 
 def _deduplicate_evidence(chapters: list[ChapterAnalysis]) -> list[EvidenceFinding]:
@@ -1001,11 +997,15 @@ def _synthesize_chapter(
     def merge_people_relations(
         results: list[ChapterPeopleRelationsResult],
     ) -> ChapterPeopleRelationsResult:
-        people: dict[tuple[str, int], Any] = {}
+        people: dict[tuple[str, int, tuple[str, ...]], Any] = {}
         relations: dict[tuple[str, str, str, str, int], Any] = {}
         for result in results:
             for person in result.people:
-                key = (person.name.casefold(), person.first_chapter)
+                key = (
+                    person.name.casefold(),
+                    person.first_chapter,
+                    tuple(sorted(dict.fromkeys(person.evidence_ids))),
+                )
                 current = people.get(key)
                 if current is None:
                     people[key] = person
@@ -1121,12 +1121,28 @@ def _synthesize_chapter(
         response_model: type[BaseModel],
         combine: Callable[[list[Any]], Any],
         cache_field: str,
+        split_field: str,
         progress_label: str,
     ) -> Any:
         nonlocal active_work
         cache = dict(getattr(active_work, cache_field))
+        split_markers = set(getattr(active_work, split_field))
+
+        if on_work_checkpoint:
+            on_work_checkpoint(
+                active_work,
+                f"{progress_label.removesuffix(' checkpointed')} in progress",
+            )
 
         def generate(batch: list[ChapterAnalysis]) -> Any:
+            if on_work_checkpoint:
+                on_work_checkpoint(
+                    active_work,
+                    (
+                        f"{progress_label.removesuffix(' checkpointed')} "
+                        f"subgroup in progress ({len(batch)} segments)"
+                    ),
+                )
             prompt = (
                 "Consolidate only the supplied candidate fields. Merge duplicates "
                 "only when they clearly describe the same item; preserve uncertain "
@@ -1153,6 +1169,21 @@ def _synthesize_chapter(
             if on_work_checkpoint:
                 on_work_checkpoint(active_work, progress_label)
 
+        def save_split(key: str) -> None:
+            nonlocal active_work
+            split_markers.add(key)
+            active_work = active_work.model_copy(
+                update={split_field: set(split_markers)}, deep=True
+            )
+            if on_work_checkpoint:
+                on_work_checkpoint(
+                    active_work,
+                    (
+                        f"{progress_label.removesuffix(' checkpointed')} split; "
+                        "subgroup in progress"
+                    ),
+                )
+
         return run_adaptive_synthesis(
             verified_segments,
             task=task,
@@ -1167,6 +1198,8 @@ def _synthesize_chapter(
             cache_key=batch_cache_key,
             cached=cache,
             on_completed=save_completed,
+            split_keys=split_markers,
+            on_split_decided=save_split,
         )
 
     people_relations = run_group(
@@ -1175,6 +1208,7 @@ def _synthesize_chapter(
         response_model=ChapterPeopleRelationsResult,
         combine=merge_people_relations,
         cache_field="people_relations_batches",
+        split_field="people_relations_splits",
         progress_label="people and relations checkpointed",
     )
     events_result = run_group(
@@ -1183,6 +1217,7 @@ def _synthesize_chapter(
         response_model=ChapterEventsResult,
         combine=merge_events,
         cache_field="events_batches",
+        split_field="events_splits",
         progress_label="events and evidence checkpointed",
     )
     interpretation = run_group(
@@ -1191,6 +1226,7 @@ def _synthesize_chapter(
         response_model=ChapterInterpretationResult,
         combine=merge_interpretation,
         cache_field="interpretation_batches",
+        split_field="interpretation_splits",
         progress_label="interpretation checkpointed",
     )
 
@@ -1200,6 +1236,9 @@ def _synthesize_chapter(
             for evidence_id in dict.fromkeys(ids)
             if evidence_id in citation_catalog
         ]
+
+    def has_valid_evidence(ids: list[str]) -> bool:
+        return bool(ids) and all(evidence_id in citation_catalog for evidence_id in ids)
 
     return ChapterAnalysis(
         chapter_number=chapter.number,
@@ -1221,6 +1260,8 @@ def _synthesize_chapter(
                 citations=citations_for(person.evidence_ids),
             )
             for person in people_relations.people
+            if has_valid_evidence(person.evidence_ids)
+            and person.first_chapter <= chapter.number
         ],
         relations=[
             RelationFinding(
@@ -1233,6 +1274,8 @@ def _synthesize_chapter(
                 citations=citations_for(relation.evidence_ids),
             )
             for relation in people_relations.relations
+            if has_valid_evidence(relation.evidence_ids)
+            and relation.first_chapter <= chapter.number
         ],
         events=[
             TimelineEvent(
@@ -1244,6 +1287,8 @@ def _synthesize_chapter(
                 citations=citations_for(event.evidence_ids),
             )
             for event in events_result.events
+            if has_valid_evidence(event.evidence_ids)
+            and event.chapter == chapter.number
         ],
         evidence=evidence,
         claims=[
@@ -1258,6 +1303,14 @@ def _synthesize_chapter(
                 citations=citations_for(claim.evidence_ids),
             )
             for claim in interpretation.claims
+            if has_valid_evidence(claim.evidence_ids)
+            and claim.introduced_chapter <= chapter.number
+            and (
+                claim.resolved_chapter is None
+                or claim.introduced_chapter
+                <= claim.resolved_chapter
+                <= chapter.number
+            )
         ],
         uncertainties=interpretation.uncertainties,
     )
@@ -1413,6 +1466,11 @@ def _analyze_source_chapter(
         if segment_key in segment_cache:
             segments.append(segment_cache[segment_key])
             continue
+        if on_work_checkpoint:
+            on_work_checkpoint(
+                active_work.model_copy(deep=True),
+                f"segment {segment_number}/{len(source_segments)} in progress",
+            )
         result = adapter.generate(
             task="segment_analysis",
             system=(
@@ -1454,8 +1512,11 @@ def _analyze_source_chapter(
         on_work_checkpoint=lambda update, detail: save_work(
             detail,
             people_relations_batches=update.people_relations_batches,
+            people_relations_splits=update.people_relations_splits,
             events_batches=update.events_batches,
+            events_splits=update.events_splits,
             interpretation_batches=update.interpretation_batches,
+            interpretation_splits=update.interpretation_splits,
         ),
     )
 

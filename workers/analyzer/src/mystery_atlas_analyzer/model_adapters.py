@@ -17,6 +17,21 @@ from .contracts import ResponseT
 
 logger = logging.getLogger(__name__)
 
+ADAPTIVE_CONTENT_TASKS = frozenset(
+    {
+        "chapter_people_relations",
+        "chapter_events_evidence",
+        "chapter_interpretation",
+        "part_synthesis",
+        "book_claim_merge",
+        "book_claim_audit",
+        "book_editorial",
+        "book_editorial_structure",
+        "book_editorial_interpretation",
+        "book_editorial_mysteries",
+    }
+)
+
 
 class ModelConfigurationError(RuntimeError):
     pass
@@ -401,11 +416,7 @@ class OpenAICompatibleAdapter:
                 elapsed_ms = round((time.perf_counter() - started_at) * 1000)
                 truncated = isinstance(exc, ModelOutputTruncatedError)
                 content_idle = isinstance(exc, ModelContentIdleError)
-                adaptive_content_task = task in {
-                    "book_claim_merge",
-                    "book_claim_audit",
-                    "book_editorial",
-                }
+                adaptive_content_task = task in ADAPTIVE_CONTENT_TASKS
                 if isinstance(exc, HTTPError):
                     retry_limit = (
                         self.attempts

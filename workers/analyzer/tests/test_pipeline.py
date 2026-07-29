@@ -1463,40 +1463,50 @@ def test_multisegment_chapter_uses_field_groups_and_hydrates_evidence_ids() -> N
             if task.startswith("chapter_"):
                 assert evidence_ids
                 evidence_id = evidence_ids[0]
-            if task == "chapter_people_relations":
-                return response_model.model_validate(
-                    {
-                        "people": [
-                            {
-                                "name": "Alice",
-                                "aliases": [],
-                                "role": "witness",
-                                "description": "She sees Bob leave.",
-                                "first_chapter": 1,
-                                "evidence_ids": [evidence_id],
-                            },
-                            {
-                                "name": "Bob",
-                                "aliases": [],
-                                "role": "suspect",
-                                "description": "He leaves the scene.",
-                                "first_chapter": 1,
-                                "evidence_ids": [evidence_id],
-                            },
-                        ],
-                        "relations": [
-                            {
-                                "source": "Alice",
-                                "target": "Bob",
-                                "label": "observes",
-                                "kind": "investigation",
-                                "status": "confirmed",
-                                "first_chapter": 1,
-                                "evidence_ids": [evidence_id],
-                            }
-                        ],
-                    }
-                )
+                if task == "chapter_people_relations":
+                    return response_model.model_validate(
+                        {
+                            "people": [
+                                {
+                                    "name": "Alice",
+                                    "aliases": [],
+                                    "role": "witness",
+                                    "description": "She sees Bob leave.",
+                                    "first_chapter": 1,
+                                    "evidence_ids": [evidence_id],
+                                },
+                                {
+                                    "name": "Mallory",
+                                    "first_chapter": 1,
+                                    "evidence_ids": ["ev-invented"],
+                                },
+                                {
+                                    "name": "Eve",
+                                    "first_chapter": 1,
+                                    "evidence_ids": [evidence_id, "ev-invented"],
+                                },
+                                {
+                                    "name": "Bob",
+                                    "aliases": [],
+                                    "role": "suspect",
+                                    "description": "He leaves the scene.",
+                                    "first_chapter": 1,
+                                    "evidence_ids": [evidence_id],
+                                },
+                            ],
+                            "relations": [
+                                {
+                                    "source": "Alice",
+                                    "target": "Bob",
+                                    "label": "observes",
+                                    "kind": "investigation",
+                                    "status": "confirmed",
+                                    "first_chapter": 1,
+                                    "evidence_ids": [evidence_id],
+                                }
+                            ],
+                        }
+                    )
             if task == "chapter_events_evidence":
                 return response_model.model_validate(
                     {
@@ -1508,7 +1518,12 @@ def test_multisegment_chapter_uses_field_groups_and_hydrates_evidence_ids() -> N
                                 "story_time": "",
                                 "narrative_time": "",
                                 "evidence_ids": [evidence_id],
-                            }
+                            },
+                            {
+                                "chapter": 99,
+                                "summary": "Invented future event.",
+                                "evidence_ids": [evidence_id],
+                            },
                         ]
                     }
                 )
@@ -1529,7 +1544,19 @@ def test_multisegment_chapter_uses_field_groups_and_hydrates_evidence_ids() -> N
                                 "resolved_chapter": None,
                                 "reasoning": [],
                                 "evidence_ids": [evidence_id],
-                            }
+                            },
+                            {
+                                "statement": "Unsupported claim.",
+                                "kind": "analysis_inference",
+                                "introduced_chapter": 1,
+                                "evidence_ids": ["ev-invented"],
+                            },
+                            {
+                                "statement": "Future claim.",
+                                "kind": "analysis_inference",
+                                "introduced_chapter": 99,
+                                "evidence_ids": [evidence_id],
+                            },
                         ],
                         "uncertainties": [],
                     }
@@ -1576,6 +1603,9 @@ def test_multisegment_chapter_uses_field_groups_and_hydrates_evidence_ids() -> N
     assert chapter.relations[0].citations[0].verified is True
     assert chapter.events[0].citations[0].verified is True
     assert chapter.claims[0].citations[0].verified is True
+    assert [person.name for person in chapter.people] == ["Alice", "Bob"]
+    assert len(chapter.events) == 1
+    assert len(chapter.claims) == 1
     assert chapter.evidence
     assert all(item.evidence_id.startswith("ev-") for item in chapter.evidence)
 
@@ -1626,6 +1656,8 @@ def test_multisegment_chapter_resumes_segments_and_completed_field_groups() -> N
                 dict.fromkeys(re.findall(r'"evidence_id":\s*"([^"]+)"', prompt))
             )
             if task == "chapter_people_relations":
+                if len(evidence_ids) > 1:
+                    raise ModelOutputTruncatedError("provider length")
                 return response_model.model_validate(
                     {
                         "people": [
@@ -1687,12 +1719,14 @@ def test_multisegment_chapter_resumes_segments_and_completed_field_groups() -> N
         chunk_overlap_chars=0,
     )
     checkpoints: list[AnalysisCheckpoint] = []
+    progress_updates: list[contracts.AnalysisProgress] = []
 
     with pytest.raises(ModelOutputTruncatedError):
         analyze_book(
             book,
             adapter,
             config,
+            on_progress=progress_updates.append,
             on_checkpoint=checkpoints.append,
         )
 
@@ -1700,6 +1734,10 @@ def test_multisegment_chapter_resumes_segments_and_completed_field_groups() -> N
     work = checkpoints[-1].chapter_work["1"]
     assert len(work.segments) == 2
     assert work.people_relations_batches
+    assert work.events_splits
+    assert "events and evidence subgroup in progress" in (
+        progress_updates[-1].detail
+    )
     segment_calls = adapter.tasks.count("segment_analysis")
     people_calls = adapter.tasks.count("chapter_people_relations")
     event_calls = adapter.tasks.count("chapter_events_evidence")
@@ -1716,7 +1754,8 @@ def test_multisegment_chapter_resumes_segments_and_completed_field_groups() -> N
     assert report.chapters[0].summary == "Alice witnesses a departure."
     assert adapter.tasks.count("segment_analysis") == segment_calls
     assert adapter.tasks.count("chapter_people_relations") == people_calls
-    assert adapter.tasks.count("chapter_events_evidence") == event_calls + 2
+    assert adapter.tasks.count("chapter_events_evidence") == event_calls + 1
+    assert len(report.chapters[0].people) == 2
     assert checkpoints[-1].chapter_work == {}
 
 

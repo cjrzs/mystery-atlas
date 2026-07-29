@@ -583,6 +583,62 @@ def test_non_splittable_content_idle_retries_only_once(monkeypatch) -> None:
     assert calls == 2
 
 
+@pytest.mark.parametrize(
+    "task",
+    [
+        "chapter_people_relations",
+        "chapter_events_evidence",
+        "chapter_interpretation",
+        "part_synthesis",
+        "book_editorial_structure",
+        "book_editorial_interpretation",
+        "book_editorial_mysteries",
+    ],
+)
+def test_adaptive_content_tasks_surface_idle_without_adapter_retry(
+    monkeypatch,
+    task,
+) -> None:
+    calls = 0
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_read_stream(response, **kwargs):
+        del response, kwargs
+        nonlocal calls
+        calls += 1
+        raise model_adapters.ModelContentIdleError("idle", response_chars=0)
+
+    monkeypatch.setattr(
+        "mystery_atlas_analyzer.model_adapters.urlopen",
+        lambda request, timeout: FakeResponse(),
+    )
+    monkeypatch.setattr(
+        "mystery_atlas_analyzer.model_adapters._read_stream_content",
+        fake_read_stream,
+    )
+    adapter = OpenAICompatibleAdapter(
+        base_url="https://api.example.test/v1",
+        attempts=3,
+    )
+
+    with pytest.raises(model_adapters.ModelContentIdleError):
+        adapter.generate(
+            task=task,
+            system="Return a bounded result.",
+            prompt="Bounded input.",
+            response_model=EvidenceAudit,
+            model="deepseek-v4-pro",
+        )
+
+    assert calls == 1
+
+
 def test_incomplete_stream_is_rejected(monkeypatch) -> None:
     class FakeResponse:
         def __enter__(self):
