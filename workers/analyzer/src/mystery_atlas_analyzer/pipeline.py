@@ -7,10 +7,12 @@ import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 from pydantic import BaseModel
 
+from .adaptive import run_adaptive_synthesis
 from .contracts import (
     AnalysisCheckpoint,
     AnalysisProgress,
@@ -22,6 +24,10 @@ from .contracts import (
     BookStructureEditorial,
     BookSynthesis,
     ChapterAnalysis,
+    ChapterEventsResult,
+    ChapterInterpretationResult,
+    ChapterPeopleRelationsResult,
+    ChapterWorkCheckpoint,
     CheckpointCallback,
     ClaimAuditResult,
     ClaimFinding,
@@ -30,12 +36,15 @@ from .contracts import (
     EvidenceFinding,
     ModelAdapter,
     PartSynthesis,
+    PersonFinding,
     ProgressCallback,
     ReconciliationResult,
+    RelationFinding,
     SourceChapter,
     SourceCitation,
+    TimelineEvent,
 )
-from .model_adapters import ModelContentIdleError, ModelOutputTruncatedError
+from .model_adapters import ModelContentIdleError
 
 logger = logging.getLogger(__name__)
 
@@ -592,84 +601,86 @@ def _merge_claims_adaptively(
                 list(dict.fromkeys([*combined[2], *next_level[2]])),
             )
         return combined
-    result = cached_batches.get(batch_key)
-    if result is None:
+    def generate_result(batch: list[dict[str, Any]]) -> ClaimMergeResult:
+        current_key = _claim_batch_key(batch)
+        current_prompt = _claim_merge_prompt(batch, catalog)
         logger.info(
             "AI batch dispatch task=book_claim_merge batch_id=%s "
             "parent_batch_id=%s layer=%d items=%d request_chars=%d",
-            batch_key,
+            current_key,
             parent_batch_id or "none",
             layer,
-            len(candidates),
-            len(prompt),
+            len(batch),
+            len(current_prompt),
         )
-        try:
-            result = adapter.generate(
-                task="book_claim_merge",
-                system="You merge evidence-grounded whole-book claims.",
-                prompt=prompt,
-                response_model=ClaimMergeResult,
-                model=model,
-            )
-        except (ModelOutputTruncatedError, ModelContentIdleError) as exc:
-            logger.info(
-                "AI batch split task=book_claim_merge batch_id=%s "
-                "parent_batch_id=%s layer=%d reason=%s items=%d "
-                "request_chars=%d response_chars=%s",
-                batch_key,
-                parent_batch_id or "none",
-                layer,
-                "content_idle"
-                if isinstance(exc, ModelContentIdleError)
-                else "provider_length",
-                len(candidates),
-                len(prompt),
-                getattr(exc, "response_chars", "unknown"),
-            )
-            if len(candidates) <= 1:
-                if isinstance(exc, ModelContentIdleError):
-                    result = adapter.generate(
-                        task="book_claim_merge",
-                        system="You merge evidence-grounded whole-book claims.",
-                        prompt=prompt,
-                        response_model=ClaimMergeResult,
-                        model=model,
-                    )
-                else:
-                    raise
-            else:
-                middle = len(candidates) // 2
-                left = _merge_claims_adaptively(
-                    adapter,
-                    model=model,
-                    candidates=candidates[:middle],
-                    catalog=catalog,
-                    cached_batches=cached_batches,
-                    on_batch=on_batch,
-                    max_batch_chars=max_batch_chars,
-                    max_concurrency=max_concurrency,
-                    layer=layer + 1,
-                    parent_batch_id=batch_key,
+        return adapter.generate(
+            task="book_claim_merge",
+            system="You merge evidence-grounded whole-book claims.",
+            prompt=current_prompt,
+            response_model=ClaimMergeResult,
+            model=model,
+        )
+
+    def split_candidates(
+        batch: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        middle = len(batch) // 2
+        return [batch[:middle], batch[middle:]]
+
+    def combine_results(results: list[ClaimMergeResult]) -> ClaimMergeResult:
+        return ClaimMergeResult(
+            claims=[decision for result in results for decision in result.claims],
+            contradictions=list(
+                dict.fromkeys(
+                    item for result in results for item in result.contradictions
                 )
-                right = _merge_claims_adaptively(
-                    adapter,
-                    model=model,
-                    candidates=candidates[middle:],
-                    catalog=catalog,
-                    cached_batches=cached_batches,
-                    on_batch=on_batch,
-                    max_batch_chars=max_batch_chars,
-                    max_concurrency=max_concurrency,
-                    layer=layer + 1,
-                    parent_batch_id=batch_key,
+            ),
+            uncertainties=list(
+                dict.fromkeys(
+                    item for result in results for item in result.uncertainties
                 )
-                return (
-                    [*left[0], *right[0]],
-                    [*left[1], *right[1]],
-                    [*left[2], *right[2]],
-                )
-        if on_batch:
-            on_batch(batch_key, result)
+            ),
+        )
+
+    def log_split(
+        batch: list[dict[str, Any]],
+        exc: Exception,
+        children: list[list[dict[str, Any]]],
+    ) -> None:
+        current_prompt = _claim_merge_prompt(batch, catalog)
+        logger.info(
+            "AI batch split task=book_claim_merge batch_id=%s "
+            "parent_batch_id=%s layer=%d reason=%s items=%d "
+            "request_chars=%d response_chars=%s child_count=%d",
+            _claim_batch_key(batch),
+            parent_batch_id or "none",
+            layer,
+            "content_idle"
+            if isinstance(exc, ModelContentIdleError)
+            else "provider_length",
+            len(batch),
+            len(current_prompt),
+            getattr(exc, "response_chars", "unknown"),
+            len(children),
+        )
+
+    result = run_adaptive_synthesis(
+        candidates,
+        task="book_claim_merge",
+        generate=generate_result,
+        can_split=lambda batch: len(batch) > 1,
+        split=split_candidates,
+        combine=combine_results,
+        describe=lambda batch: {
+            "items": len(batch),
+            "layer": layer,
+        },
+        cache_key=_claim_batch_key,
+        cached=cached_batches,
+        on_completed=on_batch,
+        on_split=log_split,
+        cache_combined=False,
+    )
     return (
         _apply_claim_merge(result, candidates, catalog),
         result.contradictions,
@@ -838,6 +849,9 @@ def _synthesize_chapter(
     config: PipelineConfig,
     chapter: SourceChapter,
     segments: list[ChapterAnalysis],
+    *,
+    work_checkpoint: ChapterWorkCheckpoint | None = None,
+    on_work_checkpoint: Callable[[ChapterWorkCheckpoint, str], None] | None = None,
 ) -> ChapterAnalysis:
     if len(segments) == 1:
         segment = segments[0]
@@ -851,31 +865,401 @@ def _synthesize_chapter(
                 ),
             }
         )
-    prompt = (
-        "Merge the segment analyses into one chapter analysis. Deduplicate people, "
-        "events, claims, and evidence. Retain exact source excerpts and do not add "
-        "facts absent from the segment analyses. Keep every reader-facing field in "
-        "Simplified Chinese, while preserving person names and verbatim citations. "
-        "Relation kind must remain a stable enum code from the response schema.\n\n"
-        f"Chapter {chapter.number}: {chapter.title}\n"
-        f"{json.dumps([item.model_dump(mode='json') for item in segments], ensure_ascii=False)}"
-    )
-    merged = adapter.generate(
-        task="chapter_synthesis",
-        system="You are a meticulous whole-book analysis editor.",
-        prompt=prompt,
-        response_model=ChapterAnalysis,
-        model=config.reading_model,
-    )
-    return merged.model_copy(
-        update={
-            "chapter_number": chapter.number,
-            "chapter_title": _resolved_chapter_title(
-                chapter.title,
-                merged.chapter_title,
-                merged.summary,
-            ),
+    active_work = work_checkpoint or ChapterWorkCheckpoint()
+    verified_segments = [
+        _walk_and_verify(segment, {chapter.number: chapter}) for segment in segments
+    ]
+    evidence = _deduplicate_evidence(verified_segments)
+    evidence_by_key = {
+        _citation_key(item.citation): item.evidence_id
+        for item in evidence
+        if item.citation.verified
+    }
+    citation_catalog = {
+        item.evidence_id: item.citation
+        for item in evidence
+        if item.evidence_id and item.citation.verified
+    }
+
+    def evidence_ids(citations: list[SourceCitation]) -> list[str]:
+        return list(
+            dict.fromkeys(
+                evidence_id
+                for citation in citations
+                if citation.verified
+                for evidence_id in [evidence_by_key.get(_citation_key(citation), "")]
+                if evidence_id
+            )
+        )
+
+    def payload_for(batch: list[ChapterAnalysis], group: str) -> dict[str, Any]:
+        if group == "people_relations":
+            candidates: dict[str, Any] = {
+                "people": [
+                    {
+                        "name": person.name,
+                        "aliases": person.aliases,
+                        "role": person.role,
+                        "description": person.description,
+                        "first_chapter": person.first_chapter,
+                        "evidence_ids": evidence_ids(person.citations),
+                    }
+                    for segment in batch
+                    for person in segment.people
+                ],
+                "relations": [
+                    {
+                        "source": relation.source,
+                        "target": relation.target,
+                        "label": relation.label,
+                        "kind": relation.kind,
+                        "status": relation.status,
+                        "first_chapter": relation.first_chapter,
+                        "evidence_ids": evidence_ids(relation.citations),
+                    }
+                    for segment in batch
+                    for relation in segment.relations
+                ],
+            }
+        elif group == "events_evidence":
+            candidates = {
+                "events": [
+                    {
+                        "chapter": event.chapter,
+                        "sequence": event.sequence,
+                        "summary": event.summary,
+                        "story_time": event.story_time,
+                        "narrative_time": event.narrative_time,
+                        "evidence_ids": evidence_ids(event.citations),
+                    }
+                    for segment in batch
+                    for event in segment.events
+                ]
+            }
+        else:
+            candidates = {
+                "segment_summaries": [segment.summary for segment in batch],
+                "key_points": [
+                    point for segment in batch for point in segment.key_points
+                ],
+                "themes": [theme for segment in batch for theme in segment.themes],
+                "claims": [
+                    {
+                        "statement": claim.statement,
+                        "kind": claim.kind,
+                        "status": claim.status,
+                        "confidence": claim.confidence,
+                        "introduced_chapter": claim.introduced_chapter,
+                        "resolved_chapter": claim.resolved_chapter,
+                        "reasoning": claim.reasoning,
+                        "evidence_ids": evidence_ids(claim.citations),
+                    }
+                    for segment in batch
+                    for claim in segment.claims
+                ],
+                "uncertainties": [
+                    uncertainty
+                    for segment in batch
+                    for uncertainty in segment.uncertainties
+                ],
+            }
+        referenced_ids = {
+            evidence_id
+            for value in candidates.values()
+            if isinstance(value, list)
+            for item in value
+            if isinstance(item, dict)
+            for evidence_id in item.get("evidence_ids", [])
         }
+        return {
+            "chapter": {"number": chapter.number, "title": chapter.title},
+            "candidates": candidates,
+            "evidence_catalog": [
+                {
+                    "evidence_id": evidence_id,
+                    "chapter": citation.chapter,
+                    "excerpt": citation.excerpt,
+                }
+                for evidence_id, citation in citation_catalog.items()
+                if evidence_id in referenced_ids
+            ],
+        }
+
+    def split_batch(batch: list[ChapterAnalysis]) -> list[list[ChapterAnalysis]]:
+        midpoint = len(batch) // 2
+        return [batch[:midpoint], batch[midpoint:]]
+
+    def batch_cache_key(batch: list[ChapterAnalysis]) -> str:
+        raw = "|".join(
+            hashlib.sha256(
+                item.model_dump_json().encode("utf-8")
+            ).hexdigest()
+            for item in batch
+        )
+        return f"batch-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]}"
+
+    def merge_people_relations(
+        results: list[ChapterPeopleRelationsResult],
+    ) -> ChapterPeopleRelationsResult:
+        people: dict[tuple[str, int], Any] = {}
+        relations: dict[tuple[str, str, str, str, int], Any] = {}
+        for result in results:
+            for person in result.people:
+                key = (person.name.casefold(), person.first_chapter)
+                current = people.get(key)
+                if current is None:
+                    people[key] = person
+                    continue
+                people[key] = current.model_copy(
+                    update={
+                        "aliases": list(dict.fromkeys([*current.aliases, *person.aliases])),
+                        "evidence_ids": list(
+                            dict.fromkeys(
+                                [*current.evidence_ids, *person.evidence_ids]
+                            )
+                        ),
+                    }
+                )
+            for relation in result.relations:
+                key = (
+                    relation.source.casefold(),
+                    relation.target.casefold(),
+                    relation.label.casefold(),
+                    relation.kind,
+                    relation.first_chapter,
+                )
+                current = relations.get(key)
+                if current is None:
+                    relations[key] = relation
+                    continue
+                relations[key] = current.model_copy(
+                    update={
+                        "evidence_ids": list(
+                            dict.fromkeys(
+                                [*current.evidence_ids, *relation.evidence_ids]
+                            )
+                        )
+                    }
+                )
+        return ChapterPeopleRelationsResult(
+            people=list(people.values()), relations=list(relations.values())
+        )
+
+    def merge_events(results: list[ChapterEventsResult]) -> ChapterEventsResult:
+        events: dict[tuple[int, str], Any] = {}
+        for result in results:
+            for event in result.events:
+                key = (event.chapter, event.summary.casefold())
+                current = events.get(key)
+                if current is None:
+                    events[key] = event
+                    continue
+                events[key] = current.model_copy(
+                    update={
+                        "sequence": min(current.sequence, event.sequence),
+                        "evidence_ids": list(
+                            dict.fromkeys(
+                                [*current.evidence_ids, *event.evidence_ids]
+                            )
+                        ),
+                    }
+                )
+        return ChapterEventsResult(events=list(events.values()))
+
+    def merge_interpretation(
+        results: list[ChapterInterpretationResult],
+    ) -> ChapterInterpretationResult:
+        claims: dict[tuple[str, str, int], Any] = {}
+        for result in results:
+            for claim in result.claims:
+                key = (
+                    claim.statement.casefold(),
+                    claim.kind,
+                    claim.introduced_chapter,
+                )
+                current = claims.get(key)
+                if current is None:
+                    claims[key] = claim
+                    continue
+                claims[key] = current.model_copy(
+                    update={
+                        "evidence_ids": list(
+                            dict.fromkeys(
+                                [*current.evidence_ids, *claim.evidence_ids]
+                            )
+                        )
+                    }
+                )
+        return ChapterInterpretationResult(
+            chapter_title=next(
+                (result.chapter_title for result in results if result.chapter_title),
+                chapter.title,
+            ),
+            summary="\n".join(
+                dict.fromkeys(result.summary for result in results if result.summary)
+            ),
+            key_points=list(
+                dict.fromkeys(
+                    point for result in results for point in result.key_points
+                )
+            ),
+            themes=list(
+                dict.fromkeys(theme for result in results for theme in result.themes)
+            ),
+            claims=list(claims.values()),
+            uncertainties=list(
+                dict.fromkeys(
+                    item for result in results for item in result.uncertainties
+                )
+            ),
+        )
+
+    def run_group(
+        *,
+        task: str,
+        group: str,
+        response_model: type[BaseModel],
+        combine: Callable[[list[Any]], Any],
+        cache_field: str,
+        progress_label: str,
+    ) -> Any:
+        nonlocal active_work
+        cache = dict(getattr(active_work, cache_field))
+
+        def generate(batch: list[ChapterAnalysis]) -> Any:
+            prompt = (
+                "Consolidate only the supplied candidate fields. Merge duplicates "
+                "only when they clearly describe the same item; preserve uncertain "
+                "or conflicting items separately. Every factual output must retain "
+                "one or more evidence_ids from the catalog. Never invent an ID, "
+                "quote, or fact. Write reader-facing analysis in Simplified Chinese "
+                "while preserving person names.\n\n"
+                + json.dumps(payload_for(batch, group), ensure_ascii=False)
+            )
+            return adapter.generate(
+                task=task,
+                system="You are a meticulous chapter analysis editor.",
+                prompt=prompt,
+                response_model=response_model,
+                model=config.reading_model,
+            )
+
+        def save_completed(key: str, result: Any) -> None:
+            nonlocal active_work
+            cache[key] = result
+            active_work = active_work.model_copy(
+                update={cache_field: dict(cache)}, deep=True
+            )
+            if on_work_checkpoint:
+                on_work_checkpoint(active_work, progress_label)
+
+        return run_adaptive_synthesis(
+            verified_segments,
+            task=task,
+            generate=generate,
+            can_split=lambda batch: len(batch) > 1,
+            split=split_batch,
+            combine=combine,
+            describe=lambda batch: {
+                "chapter": chapter.number,
+                "segments": len(batch),
+            },
+            cache_key=batch_cache_key,
+            cached=cache,
+            on_completed=save_completed,
+        )
+
+    people_relations = run_group(
+        task="chapter_people_relations",
+        group="people_relations",
+        response_model=ChapterPeopleRelationsResult,
+        combine=merge_people_relations,
+        cache_field="people_relations_batches",
+        progress_label="people and relations checkpointed",
+    )
+    events_result = run_group(
+        task="chapter_events_evidence",
+        group="events_evidence",
+        response_model=ChapterEventsResult,
+        combine=merge_events,
+        cache_field="events_batches",
+        progress_label="events and evidence checkpointed",
+    )
+    interpretation = run_group(
+        task="chapter_interpretation",
+        group="interpretation",
+        response_model=ChapterInterpretationResult,
+        combine=merge_interpretation,
+        cache_field="interpretation_batches",
+        progress_label="interpretation checkpointed",
+    )
+
+    def citations_for(ids: list[str]) -> list[SourceCitation]:
+        return [
+            citation_catalog[evidence_id]
+            for evidence_id in dict.fromkeys(ids)
+            if evidence_id in citation_catalog
+        ]
+
+    return ChapterAnalysis(
+        chapter_number=chapter.number,
+        chapter_title=_resolved_chapter_title(
+            chapter.title,
+            interpretation.chapter_title,
+            interpretation.summary,
+        ),
+        summary=interpretation.summary,
+        key_points=interpretation.key_points,
+        themes=interpretation.themes,
+        people=[
+            PersonFinding(
+                name=person.name,
+                aliases=person.aliases,
+                role=person.role,
+                description=person.description,
+                first_chapter=person.first_chapter,
+                citations=citations_for(person.evidence_ids),
+            )
+            for person in people_relations.people
+        ],
+        relations=[
+            RelationFinding(
+                source=relation.source,
+                target=relation.target,
+                label=relation.label,
+                kind=relation.kind,
+                status=relation.status,
+                first_chapter=relation.first_chapter,
+                citations=citations_for(relation.evidence_ids),
+            )
+            for relation in people_relations.relations
+        ],
+        events=[
+            TimelineEvent(
+                chapter=event.chapter,
+                sequence=event.sequence,
+                summary=event.summary,
+                story_time=event.story_time,
+                narrative_time=event.narrative_time,
+                citations=citations_for(event.evidence_ids),
+            )
+            for event in events_result.events
+        ],
+        evidence=evidence,
+        claims=[
+            ClaimFinding(
+                statement=claim.statement,
+                kind=claim.kind,
+                status=claim.status,
+                confidence=claim.confidence,
+                introduced_chapter=claim.introduced_chapter,
+                resolved_chapter=claim.resolved_chapter,
+                reasoning=claim.reasoning,
+                citations=citations_for(claim.evidence_ids),
+            )
+            for claim in interpretation.claims
+        ],
+        uncertainties=interpretation.uncertainties,
     )
 
 
@@ -936,24 +1320,23 @@ def _synthesize_parts(
     def synthesize_adaptively(
         batch: list[ChapterAnalysis],
     ) -> list[PartSynthesis]:
-        try:
-            return [synthesize_batch(batch)]
-        except (ModelOutputTruncatedError, ModelContentIdleError) as exc:
-            if len(batch) == 1:
-                raise
-            midpoint = len(batch) // 2
-            logger.warning(
-                "AI batch split task=part_synthesis chapters=%d-%d "
-                "batch_size=%d error_type=%s",
-                batch[0].chapter_number,
-                batch[-1].chapter_number,
-                len(batch),
-                type(exc).__name__,
-            )
-            return [
-                *synthesize_adaptively(batch[:midpoint]),
-                *synthesize_adaptively(batch[midpoint:]),
-            ]
+        def split(items: list[ChapterAnalysis]) -> list[list[ChapterAnalysis]]:
+            midpoint = len(items) // 2
+            return [items[:midpoint], items[midpoint:]]
+
+        return run_adaptive_synthesis(
+            batch,
+            task="part_synthesis",
+            generate=lambda items: [synthesize_batch(items)],
+            can_split=lambda items: len(items) > 1,
+            split=split,
+            combine=lambda groups: [part for group in groups for part in group],
+            describe=lambda items: {
+                "first_chapter": items[0].chapter_number,
+                "last_chapter": items[-1].chapter_number,
+                "chapters": len(items),
+            },
+        )
 
     if config.max_concurrency == 1 or len(batches) == 1:
         grouped_parts: list[list[PartSynthesis]] = []
@@ -988,16 +1371,48 @@ def _analyze_source_chapter(
     chapter: SourceChapter,
     adapter: ModelAdapter,
     config: PipelineConfig,
+    *,
+    work_checkpoint: ChapterWorkCheckpoint | None = None,
+    on_work_checkpoint: Callable[[ChapterWorkCheckpoint, str], None] | None = None,
 ) -> ChapterAnalysis:
+    source_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "chapter": chapter.number,
+                "text": chapter.text,
+                "max_chunk_chars": config.max_chunk_chars,
+                "chunk_overlap_chars": config.chunk_overlap_chars,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    active_work = (
+        work_checkpoint.model_copy(deep=True)
+        if work_checkpoint is not None
+        and work_checkpoint.source_fingerprint == source_fingerprint
+        else ChapterWorkCheckpoint(source_fingerprint=source_fingerprint)
+    )
+
+    def save_work(detail: str, **updates: Any) -> None:
+        nonlocal active_work
+        active_work = active_work.model_copy(update=updates, deep=True)
+        if on_work_checkpoint:
+            on_work_checkpoint(active_work.model_copy(deep=True), detail)
+
     segments: list[ChapterAnalysis] = []
-    for segment_number, (segment_start, segment_text) in enumerate(
-        _split_text(
-            chapter.text,
-            config.max_chunk_chars,
-            config.chunk_overlap_chars,
-        ),
-        start=1,
-    ):
+    source_segments = _split_text(
+        chapter.text,
+        config.max_chunk_chars,
+        config.chunk_overlap_chars,
+    )
+    segment_cache = dict(active_work.segments)
+    for segment_number, (segment_start, segment_text) in enumerate(source_segments, start=1):
+        raw_key = f"{segment_start}|{len(segment_text)}|{segment_text}"
+        segment_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:20]
+        if segment_key in segment_cache:
+            segments.append(segment_cache[segment_key])
+            continue
         result = adapter.generate(
             task="segment_analysis",
             system=(
@@ -1019,14 +1434,30 @@ def _analyze_source_chapter(
             segment_start=segment_start,
             segment_end=segment_start + len(segment_text),
         )
-        segments.append(
-            result.model_copy(
-                update={
-                    "chapter_number": chapter.number,
-                }
-            )
+        analyzed_segment = result.model_copy(
+            update={
+                "chapter_number": chapter.number,
+            }
         )
-    return _synthesize_chapter(adapter, config, chapter, segments)
+        segments.append(analyzed_segment)
+        segment_cache[segment_key] = analyzed_segment
+        save_work(
+            f"segment {segment_number}/{len(source_segments)} checkpointed",
+            segments=dict(segment_cache),
+        )
+    return _synthesize_chapter(
+        adapter,
+        config,
+        chapter,
+        segments,
+        work_checkpoint=active_work,
+        on_work_checkpoint=lambda update, detail: save_work(
+            detail,
+            people_relations_batches=update.people_relations_batches,
+            events_batches=update.events_batches,
+            interpretation_batches=update.interpretation_batches,
+        ),
+    )
 
 
 def _compact_editorial_part(part: PartSynthesis) -> dict[str, Any]:
@@ -1094,8 +1525,27 @@ def _generate_editorial_adaptively(
     on_split: Callable[[], None] | None = None,
     on_section: Callable[[str, BaseModel], None] | None = None,
 ) -> BookEditorial:
-    if not split_mode:
-        try:
+    section_specs: dict[str, tuple[str, type[BaseModel], str]] = {
+        "structure": (
+            "book_editorial_structure",
+            BookStructureEditorial,
+            "Return only the overview and structural sections.",
+        ),
+        "interpretation": (
+            "book_editorial_interpretation",
+            BookInterpretationEditorial,
+            "Return only core ideas, themes, character arcs, and action insights.",
+        ),
+        "mysteries": (
+            "book_editorial_mysteries",
+            BookMysteryEditorial,
+            "Return only mysteries, contradictions, foreshadowing, and uncertainties.",
+        ),
+    }
+
+    def generate(keys: tuple[str, ...]) -> BaseModel:
+        key = keys[0]
+        if key == "full":
             return adapter.generate(
                 task="book_editorial",
                 system=(
@@ -1105,55 +1555,56 @@ def _generate_editorial_adaptively(
                 response_model=BookEditorial,
                 model=model,
             )
-        except (ModelOutputTruncatedError, ModelContentIdleError):
-            split_mode = True
-            if on_split:
-                on_split()
+        task, response_model, instruction = section_specs[key]
+        return adapter.generate(
+            task=task,
+            system="You write one bounded section of a whole-book analysis.",
+            prompt=f"{instruction}\n\n{prompt}",
+            response_model=response_model,
+            model=model,
+        )
 
-    section_specs: list[tuple[str, str, type[BaseModel], str]] = [
-        (
-            "structure",
-            "book_editorial_structure",
-            BookStructureEditorial,
-            "Return only the overview and structural sections.",
-        ),
-        (
-            "interpretation",
-            "book_editorial_interpretation",
-            BookInterpretationEditorial,
-            "Return only core ideas, themes, character arcs, and action insights.",
-        ),
-        (
-            "mysteries",
-            "book_editorial_mysteries",
-            BookMysteryEditorial,
-            "Return only mysteries, contradictions, foreshadowing, and uncertainties.",
-        ),
-    ]
-    resolved: dict[str, BaseModel] = {}
-    for key, task, response_model, instruction in section_specs:
-        result = cached_sections.get(key)
-        if result is None:
-            result = adapter.generate(
-                task=task,
-                system="You write one bounded section of a whole-book analysis.",
-                prompt=f"{instruction}\n\n{prompt}",
-                response_model=response_model,
-                model=model,
-            )
-            if on_section:
-                on_section(key, result)
-        resolved[key] = result
+    def combine(results: list[BaseModel]) -> BaseModel:
+        resolved = {
+            key: result
+            for key, result in zip(section_specs, results, strict=True)
+        }
+        structure = BookStructureEditorial.model_validate(resolved["structure"])
+        interpretation = BookInterpretationEditorial.model_validate(
+            resolved["interpretation"]
+        )
+        mysteries = BookMysteryEditorial.model_validate(resolved["mysteries"])
+        return BookEditorial(
+            **structure.model_dump(mode="python"),
+            **interpretation.model_dump(mode="python"),
+            **mysteries.model_dump(mode="python"),
+        )
 
-    structure = BookStructureEditorial.model_validate(resolved["structure"])
-    interpretation = BookInterpretationEditorial.model_validate(
-        resolved["interpretation"]
-    )
-    mysteries = BookMysteryEditorial.model_validate(resolved["mysteries"])
-    return BookEditorial(
-        **structure.model_dump(mode="python"),
-        **interpretation.model_dump(mode="python"),
-        **mysteries.model_dump(mode="python"),
+    def complete(key: str, result: BaseModel) -> None:
+        if on_section:
+            on_section(key, result)
+
+    def run(keys: tuple[str, ...]) -> BaseModel:
+        return run_adaptive_synthesis(
+            keys,
+            task="book_editorial",
+            generate=generate,
+            can_split=lambda value: value == ("full",),
+            split=lambda value: [(key,) for key in section_specs],
+            combine=combine,
+            describe=lambda value: {"scope": value[0]},
+            cache_key=lambda value: "" if value == ("full",) else value[0],
+            cached=cached_sections,
+            on_completed=complete,
+            on_split=(
+                (lambda value, exc, children: on_split()) if on_split else None
+            ),
+        )
+
+    if not split_mode:
+        return BookEditorial.model_validate(run(("full",)))
+    return BookEditorial.model_validate(
+        combine([run((key,)) for key in section_specs])
     )
 
 
@@ -1350,76 +1801,53 @@ def _audit_claims_adaptively(
             combined = _combine_reconciliations(combined, result)
         return combined
 
-    batch_key = _claim_audit_batch_key(claims)
-    audit = cached_batches.get(batch_key)
-    if audit is None:
-        def generate_audit() -> ClaimAuditResult:
-            return adapter.generate(
+    def generate_audit(batch: list[ClaimFinding]) -> ClaimAuditResult:
+        return adapter.generate(
                 task="book_claim_audit",
                 system="You are the final evidence auditor for whole-book claims.",
-                prompt=prompt,
+                prompt=_claim_audit_prompt(batch, catalog),
                 response_model=ClaimAuditResult,
                 model=model,
                 temperature=0,
             )
 
-        try:
-            audit = generate_audit()
-        except ModelContentIdleError:
-            if len(claims) <= 1:
-                audit = generate_audit()
-            else:
-                middle = len(claims) // 2
-                return _combine_reconciliations(
-                    _audit_claims_adaptively(
-                        adapter,
-                        model=model,
-                        claims=claims[:middle],
-                        catalog=catalog,
-                        cached_batches=cached_batches,
-                        on_batch=on_batch,
-                        max_batch_chars=max_batch_chars,
-                        max_concurrency=1,
-                    ),
-                    _audit_claims_adaptively(
-                        adapter,
-                        model=model,
-                        claims=claims[middle:],
-                        catalog=catalog,
-                        cached_batches=cached_batches,
-                        on_batch=on_batch,
-                        max_batch_chars=max_batch_chars,
-                        max_concurrency=1,
-                    ),
+    def split_claims(batch: list[ClaimFinding]) -> list[list[ClaimFinding]]:
+        middle = len(batch) // 2
+        return [batch[:middle], batch[middle:]]
+
+    def combine_audits(results: list[ClaimAuditResult]) -> ClaimAuditResult:
+        return ClaimAuditResult(
+            decisions=[decision for result in results for decision in result.decisions],
+            contradictions=list(
+                dict.fromkeys(
+                    item for result in results for item in result.contradictions
                 )
-        except ModelOutputTruncatedError:
-            if len(claims) <= 1:
-                raise
-            middle = len(claims) // 2
-            return _combine_reconciliations(
-                _audit_claims_adaptively(
-                    adapter,
-                    model=model,
-                    claims=claims[:middle],
-                    catalog=catalog,
-                    cached_batches=cached_batches,
-                    on_batch=on_batch,
-                    max_batch_chars=max_batch_chars,
-                    max_concurrency=1,
-                ),
-                _audit_claims_adaptively(
-                    adapter,
-                    model=model,
-                    claims=claims[middle:],
-                    catalog=catalog,
-                    cached_batches=cached_batches,
-                    on_batch=on_batch,
-                    max_batch_chars=max_batch_chars,
-                    max_concurrency=1,
-                ),
-            )
-        if on_batch:
-            on_batch(batch_key, audit)
+            ),
+            uncertainties=list(
+                dict.fromkeys(
+                    item for result in results for item in result.uncertainties
+                )
+            ),
+            review_notes=list(
+                dict.fromkeys(
+                    item for result in results for item in result.review_notes
+                )
+            ),
+        )
+
+    audit = run_adaptive_synthesis(
+        claims,
+        task="book_claim_audit",
+        generate=generate_audit,
+        can_split=lambda batch: len(batch) > 1,
+        split=split_claims,
+        combine=combine_audits,
+        describe=lambda batch: {"claims": len(batch)},
+        cache_key=_claim_audit_batch_key,
+        cached=cached_batches,
+        on_completed=on_batch,
+        cache_combined=False,
+    )
     return _apply_claim_audit(claims, audit)
 
 
@@ -1536,6 +1964,7 @@ def analyze_book(
     )
     has_checkpoint = bool(
         active_checkpoint.chapters
+        or active_checkpoint.chapter_work
         or active_checkpoint.parts
         or active_checkpoint.synthesis
         or active_checkpoint.reconciliation
@@ -1548,11 +1977,50 @@ def analyze_book(
             "source and chapter structure validated",
         )
 
-    def save_checkpoint(**updates: Any) -> None:
+    checkpoint_lock = Lock()
+
+    def persist_checkpoint_locked(**updates: Any) -> None:
         nonlocal active_checkpoint
         active_checkpoint = active_checkpoint.model_copy(update=updates, deep=True)
         if on_checkpoint:
             on_checkpoint(active_checkpoint.model_copy(deep=True))
+
+    def save_checkpoint(**updates: Any) -> None:
+        with checkpoint_lock:
+            persist_checkpoint_locked(**updates)
+
+    def save_chapter_work(
+        chapter_number: int,
+        work: ChapterWorkCheckpoint,
+        detail: str,
+    ) -> None:
+        with checkpoint_lock:
+            chapter_work = dict(active_checkpoint.chapter_work)
+            chapter_work[str(chapter_number)] = work
+            persist_checkpoint_locked(chapter_work=chapter_work)
+            completed_chapters = len(active_checkpoint.chapters)
+        progress = 5 + round(completed / total_chapters * 45)
+        _notify(
+            on_progress,
+            "chapter_synthesis",
+            progress,
+            (
+                f"{completed_chapters}/{total_chapters} chapters complete; "
+                f"chapter {chapter_number}: {detail}"
+            ),
+        )
+
+    def complete_chapter_checkpoint(
+        chapter_number: int,
+        chapters: list[ChapterAnalysis],
+    ) -> None:
+        with checkpoint_lock:
+            chapter_work = dict(active_checkpoint.chapter_work)
+            chapter_work.pop(str(chapter_number), None)
+            persist_checkpoint_locked(
+                chapters=chapters,
+                chapter_work=chapter_work,
+            )
 
     checkpoint_chapters = {
         chapter.chapter_number: chapter
@@ -1580,10 +2048,17 @@ def analyze_book(
                 chapter,
                 adapter,
                 config,
+                work_checkpoint=active_checkpoint.chapter_work.get(
+                    str(chapter.number)
+                ),
+                on_work_checkpoint=lambda work, detail, chapter_number=chapter.number: (
+                    save_chapter_work(chapter_number, work, detail)
+                ),
             )
             completed += 1
-            save_checkpoint(
-                chapters=[item for item in chapter_results if item is not None]
+            complete_chapter_checkpoint(
+                chapter.number,
+                [item for item in chapter_results if item is not None],
             )
             progress = 5 + round(completed / total_chapters * 45)
             _notify(
@@ -1604,6 +2079,12 @@ def analyze_book(
                     chapter,
                     adapter,
                     config,
+                    work_checkpoint=active_checkpoint.chapter_work.get(
+                        str(chapter.number)
+                    ),
+                    on_work_checkpoint=lambda work, detail, chapter_number=chapter.number: (
+                        save_chapter_work(chapter_number, work, detail)
+                    ),
                 ): index
                 for index, chapter in enumerate(book.chapters)
                 if chapter_results[index] is None
@@ -1617,8 +2098,9 @@ def analyze_book(
                     chapter_failures.append(exc)
                     continue
                 completed += 1
-                save_checkpoint(
-                    chapters=[item for item in chapter_results if item is not None]
+                complete_chapter_checkpoint(
+                    book.chapters[chapter_index].number,
+                    [item for item in chapter_results if item is not None],
                 )
                 progress = 5 + round(completed / total_chapters * 45)
                 _notify(

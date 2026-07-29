@@ -29,7 +29,7 @@ def _resume_stage(
         return "evidence_verification", 78
     if checkpoint.parts or len(checkpoint.chapters) >= total_chapters:
         return "book_synthesis", 65
-    if checkpoint.chapters:
+    if checkpoint.chapters or checkpoint.chapter_work:
         progress = 5 + round(len(checkpoint.chapters) / total_chapters * 45)
         return "segment_analysis", progress
     return "source_validation", 1
@@ -88,18 +88,21 @@ def run_analysis_job(
     )
     current_stage = resume_stage
     current_progress = max(resume_progress, loaded.progress if loaded.status == "failed" else 0)
+    current_detail = "resuming from the latest safe checkpoint"
     active_checkpoint = loaded.checkpoint
 
     def progress(update: AnalysisProgress) -> None:
-        nonlocal current_stage, current_progress
+        nonlocal current_stage, current_progress, current_detail
         current_stage = update.stage
         current_progress = update.progress
+        current_detail = update.detail
         repo.update_job(
             job_id,
             status="running",
             stage=update.stage,
             progress=update.progress,
             error=None,
+            stage_detail=update.detail,
         )
         if on_progress:
             on_progress(update)
@@ -115,6 +118,7 @@ def run_analysis_job(
         stage=current_stage,
         progress=current_progress,
         error=None,
+        stage_detail=current_detail,
     )
     try:
         report = analyze_book(
@@ -150,5 +154,6 @@ def run_analysis_job(
             stage=current_stage,
             progress=current_progress,
             error=str(exc)[:4000],
+            stage_detail=current_detail,
         )
         raise

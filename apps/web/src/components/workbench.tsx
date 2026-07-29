@@ -1255,7 +1255,8 @@ function AnalysisStatus({
         <i style={{ width: `${progress}%` }} />
       </div>
       <small>{stage}</small>
-      {analysis?.stage_detail && analysis.status === "running" && (
+      {analysis?.stage_detail &&
+        (analysis.status === "running" || analysis.status === "failed") && (
         <small>
           {analysis.stage_detail}
           {analysis.current_call_id

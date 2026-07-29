@@ -204,6 +204,7 @@ class SQLAlchemyAnalysisRepository:
         stage: str,
         progress: int,
         error: str | None = None,
+        stage_detail: str | None = None,
     ) -> None:
         jobs = self.table("analysis_jobs")
         works = self.table("works")
@@ -213,15 +214,18 @@ class SQLAlchemyAnalysisRepository:
             ).mappings().one_or_none()
             if job is None:
                 raise LookupError(f"analysis job {job_id} does not exist")
+            values: dict[str, Any] = {
+                "status": status,
+                "stage": stage,
+                "progress": progress,
+                "error": error,
+            }
+            if stage_detail is not None and "stage_detail" in jobs.c:
+                values["stage_detail"] = stage_detail[:300]
             connection.execute(
                 update(jobs)
                 .where(jobs.c.id == job_id)
-                .values(
-                    status=status,
-                    stage=stage,
-                    progress=progress,
-                    error=error,
-                )
+                .values(**values)
             )
             connection.execute(
                 update(works)

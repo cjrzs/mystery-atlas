@@ -262,6 +262,7 @@ def test_runner_persists_the_real_failure_stage_and_latest_checkpoint(
         assert saved_job.status == "failed"
         assert saved_job.stage == "book_synthesis"
         assert saved_job.progress == 65
+        assert saved_job.stage_detail == "1 parts verified; merging whole-book claims"
         checkpoint = AnalysisCheckpoint.model_validate(
             saved_job.result_summary["checkpoint"]
         )

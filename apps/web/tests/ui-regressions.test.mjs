@@ -126,6 +126,10 @@ test("workbench analysis consoles use the selected book instead of demo fixtures
   assert.doesNotMatch(workbench, /重试失败阶段/);
   assert.doesNotMatch(workbench, /从头重新分析/);
   assert.match(workbench, /analysis\?\.retry_hint/);
+  assert.match(
+    workbench,
+    /analysis\.status === "running" \|\| analysis\.status === "failed"/,
+  );
   assert.doesNotMatch(workbench, /\/retry-stage/);
   assert.doesNotMatch(workbench, /\/restart/);
   assert.doesNotMatch(workbench, /\/analysis\/retry/);

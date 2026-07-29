@@ -135,6 +135,63 @@ class ClaimFinding(BaseModel):
     citations: list[SourceCitation] = Field(default_factory=list)
 
 
+class ChapterPersonDecision(BaseModel):
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    role: str = ""
+    description: str = ""
+    first_chapter: int = Field(ge=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ChapterRelationDecision(BaseModel):
+    source: str
+    target: str
+    label: str
+    kind: RelationKind = "unknown"
+    status: Literal["confirmed", "inferred", "disputed", "uncertain"] = "inferred"
+    first_chapter: int = Field(ge=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ChapterEventDecision(BaseModel):
+    chapter: int = Field(ge=1)
+    sequence: int = Field(default=1, ge=1)
+    summary: str
+    story_time: str = ""
+    narrative_time: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ChapterClaimDecision(BaseModel):
+    statement: str
+    kind: Literal["author_explicit", "analysis_inference", "open_question"]
+    status: Literal["confirmed", "inferred", "disputed", "uncertain"] = "inferred"
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    introduced_chapter: int = Field(ge=1)
+    resolved_chapter: int | None = Field(default=None, ge=1)
+    reasoning: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ChapterPeopleRelationsResult(BaseModel):
+    people: list[ChapterPersonDecision] = Field(default_factory=list)
+    relations: list[ChapterRelationDecision] = Field(default_factory=list)
+
+
+class ChapterEventsResult(BaseModel):
+    events: list[ChapterEventDecision] = Field(default_factory=list)
+
+
+class ChapterInterpretationResult(BaseModel):
+    chapter_title: str
+    summary: str
+    key_points: list[str] = Field(default_factory=list)
+    themes: list[str] = Field(default_factory=list)
+    claims: list[ChapterClaimDecision] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+
+
 class ChapterAnalysis(BaseModel):
     chapter_number: int = Field(ge=1)
     chapter_title: str
@@ -254,8 +311,21 @@ class ClaimAuditResult(BaseModel):
     review_notes: list[str] = Field(default_factory=list)
 
 
+class ChapterWorkCheckpoint(BaseModel):
+    source_fingerprint: str = ""
+    segments: dict[str, ChapterAnalysis] = Field(default_factory=dict)
+    people_relations_batches: dict[str, ChapterPeopleRelationsResult] = Field(
+        default_factory=dict
+    )
+    events_batches: dict[str, ChapterEventsResult] = Field(default_factory=dict)
+    interpretation_batches: dict[str, ChapterInterpretationResult] = Field(
+        default_factory=dict
+    )
+
+
 class AnalysisCheckpoint(BaseModel):
     chapters: list[ChapterAnalysis] = Field(default_factory=list)
+    chapter_work: dict[str, ChapterWorkCheckpoint] = Field(default_factory=dict)
     parts: list[PartSynthesis] = Field(default_factory=list)
     claim_merge_batches: dict[str, ClaimMergeResult] = Field(default_factory=dict)
     book_claims: list[ClaimFinding] | None = None

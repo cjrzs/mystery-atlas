@@ -1384,6 +1384,342 @@ def test_pipeline_flags_a_model_excerpt_that_is_not_in_the_book() -> None:
     assert report.evidence_index[0].citation.verified is False
 
 
+def test_multisegment_chapter_uses_field_groups_and_hydrates_evidence_ids() -> None:
+    class FieldGroupedChapterAdapter:
+        def __init__(self) -> None:
+            self.tasks: list[str] = []
+
+        def generate(
+            self,
+            *,
+            task,
+            system,
+            prompt,
+            response_model,
+            model,
+            temperature=0.1,
+        ):
+            del system, model, temperature
+            self.tasks.append(task)
+            if task == "segment_analysis":
+                source = prompt.split("<source>\n", 1)[1].split("\n</source>", 1)[0]
+                excerpt = source[:24]
+                source_citation = SourceCitation(chapter=1, excerpt=excerpt)
+                return ChapterAnalysis(
+                    chapter_number=1,
+                    chapter_title="Chapter 1",
+                    summary="Alice watches Bob leave.",
+                    people=[
+                        contracts.PersonFinding(
+                            name="Alice",
+                            role="witness",
+                            first_chapter=1,
+                            citations=[source_citation],
+                        ),
+                        contracts.PersonFinding(
+                            name="Bob",
+                            role="suspect",
+                            first_chapter=1,
+                            citations=[source_citation],
+                        ),
+                    ],
+                    relations=[
+                        contracts.RelationFinding(
+                            source="Alice",
+                            target="Bob",
+                            label="observes",
+                            kind="investigation",
+                            first_chapter=1,
+                            citations=[source_citation],
+                        )
+                    ],
+                    events=[
+                        TimelineEvent(
+                            chapter=1,
+                            summary="Bob leaves while Alice watches.",
+                            citations=[source_citation],
+                        )
+                    ],
+                    evidence=[
+                        EvidenceFinding(
+                            title="Alice sees Bob",
+                            summary="Alice observes Bob leaving.",
+                            citation=source_citation,
+                        )
+                    ],
+                    claims=[
+                        ClaimFinding(
+                            statement="Alice saw Bob leave.",
+                            kind="author_explicit",
+                            introduced_chapter=1,
+                            citations=[source_citation],
+                        )
+                    ],
+                )
+
+            evidence_ids = list(
+                dict.fromkeys(re.findall(r'"evidence_id":\s*"([^"]+)"', prompt))
+            )
+            if task.startswith("chapter_"):
+                assert evidence_ids
+                evidence_id = evidence_ids[0]
+            if task == "chapter_people_relations":
+                return response_model.model_validate(
+                    {
+                        "people": [
+                            {
+                                "name": "Alice",
+                                "aliases": [],
+                                "role": "witness",
+                                "description": "She sees Bob leave.",
+                                "first_chapter": 1,
+                                "evidence_ids": [evidence_id],
+                            },
+                            {
+                                "name": "Bob",
+                                "aliases": [],
+                                "role": "suspect",
+                                "description": "He leaves the scene.",
+                                "first_chapter": 1,
+                                "evidence_ids": [evidence_id],
+                            },
+                        ],
+                        "relations": [
+                            {
+                                "source": "Alice",
+                                "target": "Bob",
+                                "label": "observes",
+                                "kind": "investigation",
+                                "status": "confirmed",
+                                "first_chapter": 1,
+                                "evidence_ids": [evidence_id],
+                            }
+                        ],
+                    }
+                )
+            if task == "chapter_events_evidence":
+                return response_model.model_validate(
+                    {
+                        "events": [
+                            {
+                                "chapter": 1,
+                                "sequence": 1,
+                                "summary": "Bob leaves while Alice watches.",
+                                "story_time": "",
+                                "narrative_time": "",
+                                "evidence_ids": [evidence_id],
+                            }
+                        ]
+                    }
+                )
+            if task == "chapter_interpretation":
+                return response_model.model_validate(
+                    {
+                        "chapter_title": "Chapter 1",
+                        "summary": "Alice watches Bob leave the scene.",
+                        "key_points": ["Alice is a direct witness."],
+                        "themes": ["observation"],
+                        "claims": [
+                            {
+                                "statement": "Alice saw Bob leave.",
+                                "kind": "author_explicit",
+                                "status": "confirmed",
+                                "confidence": 0.9,
+                                "introduced_chapter": 1,
+                                "resolved_chapter": None,
+                                "reasoning": [],
+                                "evidence_ids": [evidence_id],
+                            }
+                        ],
+                        "uncertainties": [],
+                    }
+                )
+            if task == "part_synthesis":
+                return PartSynthesis(chapter_numbers=[], summary="Part summary")
+            if task == "book_editorial":
+                return contracts.BookEditorial(overview="Book overview")
+            raise AssertionError(f"unexpected task: {task}")
+
+    adapter = FieldGroupedChapterAdapter()
+    report = analyze_book(
+        BookInput(
+            work_id="work-field-groups",
+            edition_id="edition-field-groups",
+            title="Long Witness Chapter",
+            author="A. Writer",
+            chapters=[
+                SourceChapter(
+                    number=1,
+                    title="Chapter 1",
+                    text="Alice saw Bob leave. " * 80,
+                )
+            ],
+        ),
+        adapter,
+        PipelineConfig(
+            reading_model="reading",
+            max_chunk_chars=1000,
+            chunk_overlap_chars=0,
+        ),
+    )
+
+    assert "chapter_synthesis" not in adapter.tasks
+    assert adapter.tasks.count("segment_analysis") == 2
+    assert {
+        "chapter_people_relations",
+        "chapter_events_evidence",
+        "chapter_interpretation",
+    }.issubset(adapter.tasks)
+    chapter = report.chapters[0]
+    assert chapter.summary == "Alice watches Bob leave the scene."
+    assert chapter.people[0].citations[0].verified is True
+    assert chapter.relations[0].citations[0].verified is True
+    assert chapter.events[0].citations[0].verified is True
+    assert chapter.claims[0].citations[0].verified is True
+    assert chapter.evidence
+    assert all(item.evidence_id.startswith("ev-") for item in chapter.evidence)
+
+
+def test_multisegment_chapter_resumes_segments_and_completed_field_groups() -> None:
+    class ResumableChapterAdapter:
+        def __init__(self) -> None:
+            self.fail_events = True
+            self.tasks: list[str] = []
+            self.event_singleton_calls = 0
+
+        def generate(
+            self,
+            *,
+            task,
+            system,
+            prompt,
+            response_model,
+            model,
+            temperature=0.1,
+        ):
+            del system, model, temperature
+            self.tasks.append(task)
+            if task == "segment_analysis":
+                source = prompt.split("<source>\n", 1)[1].split("\n</source>", 1)[0]
+                excerpt = source[:24]
+                citation = SourceCitation(chapter=1, excerpt=excerpt)
+                return ChapterAnalysis(
+                    chapter_number=1,
+                    chapter_title="Chapter 1",
+                    summary="A witnessed departure.",
+                    people=[
+                        contracts.PersonFinding(
+                            name="Alice",
+                            first_chapter=1,
+                            citations=[citation],
+                        )
+                    ],
+                    events=[
+                        TimelineEvent(
+                            chapter=1,
+                            summary="Alice witnesses a departure.",
+                            citations=[citation],
+                        )
+                    ],
+                )
+            evidence_ids = list(
+                dict.fromkeys(re.findall(r'"evidence_id":\s*"([^"]+)"', prompt))
+            )
+            if task == "chapter_people_relations":
+                return response_model.model_validate(
+                    {
+                        "people": [
+                            {
+                                "name": "Alice",
+                                "first_chapter": 1,
+                                "evidence_ids": [evidence_ids[0]],
+                            }
+                        ]
+                    }
+                )
+            if task == "chapter_events_evidence":
+                if len(evidence_ids) > 1:
+                    raise ModelOutputTruncatedError("provider length")
+                self.event_singleton_calls += 1
+                if self.fail_events and self.event_singleton_calls == 2:
+                    raise ModelOutputTruncatedError("provider length")
+                return response_model.model_validate(
+                    {
+                        "events": [
+                            {
+                                "chapter": 1,
+                                "summary": "Alice witnesses a departure.",
+                                "evidence_ids": [evidence_ids[0]],
+                            }
+                        ]
+                    }
+                )
+            if task == "chapter_interpretation":
+                return response_model.model_validate(
+                    {
+                        "chapter_title": "Chapter 1",
+                        "summary": "Alice witnesses a departure.",
+                    }
+                )
+            if task == "part_synthesis":
+                return PartSynthesis(chapter_numbers=[], summary="Part summary")
+            if task == "book_editorial":
+                return contracts.BookEditorial(overview="Book overview")
+            raise AssertionError(f"unexpected task: {task}")
+
+    adapter = ResumableChapterAdapter()
+    book = BookInput(
+        work_id="work-chapter-resume",
+        edition_id="edition-chapter-resume",
+        title="Resumable Chapter",
+        author="A. Writer",
+        chapters=[
+            SourceChapter(
+                number=1,
+                title="Chapter 1",
+                text="Alice saw Bob leave. " * 80,
+            )
+        ],
+    )
+    config = PipelineConfig(
+        reading_model="reading",
+        max_chunk_chars=1000,
+        chunk_overlap_chars=0,
+    )
+    checkpoints: list[AnalysisCheckpoint] = []
+
+    with pytest.raises(ModelOutputTruncatedError):
+        analyze_book(
+            book,
+            adapter,
+            config,
+            on_checkpoint=checkpoints.append,
+        )
+
+    assert checkpoints
+    work = checkpoints[-1].chapter_work["1"]
+    assert len(work.segments) == 2
+    assert work.people_relations_batches
+    segment_calls = adapter.tasks.count("segment_analysis")
+    people_calls = adapter.tasks.count("chapter_people_relations")
+    event_calls = adapter.tasks.count("chapter_events_evidence")
+
+    adapter.fail_events = False
+    report = analyze_book(
+        book,
+        adapter,
+        config,
+        checkpoint=checkpoints[-1],
+        on_checkpoint=checkpoints.append,
+    )
+
+    assert report.chapters[0].summary == "Alice witnesses a departure."
+    assert adapter.tasks.count("segment_analysis") == segment_calls
+    assert adapter.tasks.count("chapter_people_relations") == people_calls
+    assert adapter.tasks.count("chapter_events_evidence") == event_calls + 2
+    assert checkpoints[-1].chapter_work == {}
+
+
 def test_part_synthesis_caps_batches_inside_one_structural_parent() -> None:
     class BatchRecordingAdapter:
         def __init__(self) -> None:

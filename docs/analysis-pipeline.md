@@ -132,6 +132,57 @@ JSON 时触发读取超时；只有收到 `[DONE]` 才接受结果。
 - `works.synopsis` 只在原值为空时由全书概要填充。
 - 真实作品的关系图接口读取持久化人物和关系，并继续遵守 `through_chapter` 防剧透边界。
 
+## Truncation-safe synthesis and recovery
+
+Multi-segment chapters no longer ask the model to return one unbounded
+`ChapterAnalysis`. They run three bounded tasks instead:
+
+1. people and relations;
+2. events;
+3. interpretation and claims.
+
+Each task receives compact candidates plus stable evidence IDs. The model may
+only reference those IDs; Python hydrates the verified citations and assembles
+the final chapter deterministically. Uncertain entities are kept separate unless
+the model can justify an exact merge from the supplied candidates.
+
+`adaptive.run_adaptive_synthesis` owns the common recovery policy for chapter
+groups, part synthesis, whole-book claim merging, editorial synthesis, and claim
+audit. Provider-length and content-idle failures split according to the task's
+policy. A minimum content-idle unit is retried once; a minimum length-truncated
+unit fails the job. HTTP/network/rate-limit retries remain the model adapter's
+responsibility, so retry layers do not multiply each other.
+
+`AnalysisCheckpoint.chapter_work` stores temporary chapter state:
+
+- source-fingerprinted segment analyses;
+- completed people/relation subgroups;
+- completed event subgroups;
+- completed interpretation subgroups.
+
+Every completed subgroup is persisted immediately. On retry, only missing
+segments/subgroups run. Once a chapter succeeds, its temporary state is removed
+and replaced by the compact final chapter checkpoint. Old checkpoint JSON stays
+valid because the new field defaults to an empty mapping.
+
+The workbench exposes only safe operational progress, such as completed chapter
+counts and the active field group. Prompts, model responses, credentials, and
+internal exception bodies are not included.
+
+### Production rollout checklist
+
+1. Back up PostgreSQL and copy the active environment/Compose configuration to
+   a timestamped server backup directory.
+2. Deploy the tested commit without recreating database volumes.
+3. Run migrations with the same narrowly scoped database credentials used by
+   the API and worker. If the migration container password has drifted, repair
+   that credential mismatch before retrying the migration; never print the
+   secret in logs.
+4. Restart and health-check API, worker, and Web services.
+5. Retry only the selected failed job from its saved checkpoint.
+6. Verify the job reaches 100%, the worker queue drains, and the public analysis
+   endpoint remains healthy.
+
 ## 验证
 
 ```powershell
