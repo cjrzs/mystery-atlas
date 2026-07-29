@@ -4,6 +4,8 @@ import Link from "next/link";
 import {
   type CSSProperties,
   FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -61,6 +63,13 @@ type Selection = { type: "node" | "edge"; id: string };
 type LoadState = "loading" | "ready" | "error";
 
 const READER_PREFERENCES_KEY = "mystery-atlas:reader-preferences";
+const READER_PANEL_RATIO_KEY = "mystery-atlas:reader-panel-ratio";
+const DEFAULT_READER_PANEL_RATIO = 0.31;
+const MIN_READER_PANEL_WIDTH = 300;
+const READER_RESIZE_HANDLE_WIDTH = 8;
+const INSPECTOR_MIN_WIDTH = 320;
+const DATABASE_MIN_WIDTH_WITH_INSPECTOR = 500;
+const DATABASE_MIN_WIDTH_WITHOUT_INSPECTOR = 560;
 const defaultReaderPreferences: ReaderPreferences = {
   font_size: 17,
   line_height: 1.9,
@@ -108,6 +117,10 @@ export function Workbench({
   const [readerPreferences, setReaderPreferences] =
     useState<ReaderPreferences>(defaultReaderPreferences);
   const [readerPreferencesOwner, setReaderPreferencesOwner] = useState("");
+  const [readerPanelRatio, setReaderPanelRatio] = useState(
+    DEFAULT_READER_PANEL_RATIO,
+  );
+  const [readerPanelRatioReady, setReaderPanelRatioReady] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [mainView, setMainView] = useState<MainView>("graph");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
@@ -132,6 +145,8 @@ export function Workbench({
   const [analysisRefresh, setAnalysisRefresh] = useState(0);
   const [retryingAnalysis, setRetryingAnalysis] = useState(false);
   const analysisWorkId = useRef<string | null>(null);
+  const workbenchGridRef = useRef<HTMLDivElement | null>(null);
+  const readerPanelRef = useRef<HTMLElement | null>(null);
   const readerCopyRef = useRef<HTMLElement | null>(null);
   const currentPreferencesOwner = user?.id ?? "guest";
 
@@ -192,6 +207,30 @@ export function Workbench({
     readerPreferencesOwner,
     user,
   ]);
+
+  useEffect(() => {
+    let active = true;
+    const stored = window.localStorage.getItem(READER_PANEL_RATIO_KEY);
+    Promise.resolve().then(() => {
+      if (!active) return;
+      if (stored !== null) {
+        setReaderPanelRatio(normalizeReaderPanelRatio(Number(stored)));
+      }
+      setReaderPanelRatioReady(true);
+    });
+    return () => {
+      active = false;
+      document.body.classList.remove("reader-panel-resizing");
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!readerPanelRatioReady) return;
+    window.localStorage.setItem(
+      READER_PANEL_RATIO_KEY,
+      String(readerPanelRatio),
+    );
+  }, [readerPanelRatio, readerPanelRatioReady]);
 
   useEffect(() => {
     if (!slug && !libraryItemId) return;
@@ -306,6 +345,9 @@ export function Workbench({
     "--reader-line-height": readerPreferences.line_height,
     "--reader-content-width": `${readerPreferences.content_width}px`,
   } as CSSProperties;
+  const workbenchStyle = {
+    "--reader-panel-width": `${readerPanelRatio * 100}%`,
+  } as CSSProperties;
 
   useEffect(() => {
     readerCopyRef.current?.scrollTo({ top: 0, behavior: "auto" });
@@ -347,6 +389,61 @@ export function Workbench({
         }),
       });
     }
+  };
+
+  const updateReaderPanelRatio = useCallback(
+    (clientX: number) => {
+      const grid = workbenchGridRef.current;
+      if (!grid) return;
+      const bounds = grid.getBoundingClientRect();
+      if (bounds.width <= 0) return;
+      const databaseMinWidth = inspectorOpen
+        ? DATABASE_MIN_WIDTH_WITH_INSPECTOR
+        : DATABASE_MIN_WIDTH_WITHOUT_INSPECTOR;
+      const inspectorMinWidth = inspectorOpen ? INSPECTOR_MIN_WIDTH : 0;
+      const maximumWidth = Math.max(
+        MIN_READER_PANEL_WIDTH,
+        bounds.width -
+          databaseMinWidth -
+          inspectorMinWidth -
+          READER_RESIZE_HANDLE_WIDTH,
+      );
+      const nextWidth = Math.min(
+        maximumWidth,
+        Math.max(MIN_READER_PANEL_WIDTH, clientX - bounds.left),
+      );
+      setReaderPanelRatio(normalizeReaderPanelRatio(nextWidth / bounds.width));
+    },
+    [inspectorOpen],
+  );
+
+  const beginReaderResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.classList.add("reader-panel-resizing");
+    updateReaderPanelRatio(event.clientX);
+  };
+
+  const finishReaderResize = () => {
+    document.body.classList.remove("reader-panel-resizing");
+  };
+
+  const resizeReaderWithKeyboard = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const grid = workbenchGridRef.current;
+    const reader = readerPanelRef.current;
+    if (!grid || !reader) return;
+    event.preventDefault();
+    const gridBounds = grid.getBoundingClientRect();
+    const readerWidth = reader.getBoundingClientRect().width;
+    const direction = event.key === "ArrowLeft" ? -1 : 1;
+    const step = event.shiftKey ? 64 : 24;
+    updateReaderPanelRatio(
+      gridBounds.left + readerWidth + direction * step,
+    );
   };
 
   const handleGraphSelect = useCallback((nextSelection: Selection) => {
@@ -518,10 +615,13 @@ export function Workbench({
         } ${inspectorOpen ? "inspector-open" : "inspector-closed"} ${
           readerFocused ? "reader-focused" : ""
         }`}
+        ref={workbenchGridRef}
+        style={workbenchStyle}
       >
         <aside
           className={`reader-panel reader-theme-${readerPreferences.theme}`}
           aria-label="小说阅读器"
+          ref={readerPanelRef}
           style={readerStyle}
         >
           <div className="panel-heading">
@@ -716,6 +816,28 @@ export function Workbench({
             </span>
           </div>
         </aside>
+
+        <div
+          aria-label="调整阅读区宽度"
+          aria-orientation="vertical"
+          aria-valuemax={90}
+          aria-valuemin={5}
+          aria-valuenow={Math.round(readerPanelRatio * 100)}
+          aria-valuetext={`阅读区占工作台 ${Math.round(readerPanelRatio * 100)}%`}
+          className="reader-resize-handle"
+          onKeyDown={resizeReaderWithKeyboard}
+          onLostPointerCapture={finishReaderResize}
+          onPointerCancel={finishReaderResize}
+          onPointerDown={beginReaderResize}
+          onPointerMove={(event) => {
+            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+            updateReaderPanelRatio(event.clientX);
+          }}
+          onPointerUp={finishReaderResize}
+          role="separator"
+          tabIndex={0}
+          title="拖动调整阅读区宽度"
+        />
 
         <section className="database-panel">
           <div className="database-toolbar">
@@ -1027,6 +1149,11 @@ export function Workbench({
       </div>
     </main>
   );
+}
+
+function normalizeReaderPanelRatio(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_READER_PANEL_RATIO;
+  return Math.min(0.9, Math.max(0.05, value));
 }
 
 function normalizeReaderPreferences(value: unknown): ReaderPreferences {

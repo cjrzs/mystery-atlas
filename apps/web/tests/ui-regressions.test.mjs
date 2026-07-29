@@ -159,6 +159,50 @@ test("reader preserves semantic blocks and exposes focus preferences", async () 
   assert.match(styles, /--reader-content-width/);
 });
 
+test("reader layout divider resizes the reading area and remembers its ratio", async () => {
+  const workbench = await source("apps/web/src/components/workbench.tsx");
+  const styles = await source("apps/web/src/app/globals.css");
+
+  assert.match(workbench, /READER_PANEL_RATIO_KEY/);
+  assert.match(
+    workbench,
+    /localStorage\.getItem\(READER_PANEL_RATIO_KEY\)/,
+  );
+  assert.match(
+    workbench,
+    /localStorage\.setItem\([\s\S]*READER_PANEL_RATIO_KEY/,
+  );
+  assert.match(workbench, /className="reader-resize-handle"/);
+  assert.match(workbench, /role="separator"/);
+  assert.match(workbench, /onPointerMove=/);
+  assert.match(workbench, /onKeyDown=\{resizeReaderWithKeyboard\}/);
+  assert.match(
+    styles,
+    /\.workbench-grid\.reader-open\.inspector-open\s*\{[\s\S]*--reader-panel-width/,
+  );
+  assert.match(
+    styles,
+    /\.reader-resize-handle\s*\{[\s\S]*cursor:\s*col-resize/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 1180px\)[\s\S]*\.reader-resize-handle\s*\{\s*display:\s*none/,
+  );
+});
+
+test("reader chapter title follows the resized panel while prose keeps its measure", async () => {
+  const styles = await source("apps/web/src/app/globals.css");
+
+  assert.match(
+    styles,
+    /\.reader-copy > :not\(h1\)\s*\{[^}]*max-width:\s*var\(--reader-content-width\)/,
+  );
+  assert.match(
+    styles,
+    /\.reader-copy > h1\s*\{[^}]*max-width:\s*none;[^}]*width:\s*100%/,
+  );
+});
+
 test("reader exposes a chapter directory and resets scroll after chapter changes", async () => {
   const workbench = await source("apps/web/src/components/workbench.tsx");
   const styles = await source("apps/web/src/app/globals.css");

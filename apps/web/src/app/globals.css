@@ -1629,24 +1629,32 @@ kbd {
 }
 
 .workbench-grid.reader-open.inspector-open {
-  grid-template-columns: minmax(300px, 31vw) minmax(500px, 1fr) minmax(320px, 350px);
+  grid-template-columns:
+    minmax(300px, min(var(--reader-panel-width, 31%), calc(100% - 858px)))
+    8px
+    minmax(500px, 1fr)
+    minmax(320px, 350px);
 }
 
 .workbench-grid.reader-open.inspector-closed {
-  grid-template-columns: minmax(300px, 31vw) minmax(560px, 1fr) 0;
+  grid-template-columns:
+    minmax(300px, min(var(--reader-panel-width, 31%), calc(100% - 568px)))
+    8px
+    minmax(560px, 1fr)
+    0;
 }
 
 .workbench-grid.reader-closed.inspector-open {
-  grid-template-columns: 0 minmax(560px, 1fr) minmax(320px, 350px);
+  grid-template-columns: 0 0 minmax(560px, 1fr) minmax(320px, 350px);
 }
 
 .workbench-grid.reader-closed.inspector-closed {
-  grid-template-columns: 0 minmax(620px, 1fr) 0;
+  grid-template-columns: 0 0 minmax(620px, 1fr) 0;
 }
 
 .workbench-grid.reader-focused.reader-open,
 .workbench-grid.reader-focused.reader-closed {
-  grid-template-columns: minmax(0, 1fr) 0 0;
+  grid-template-columns: minmax(0, 1fr) 0 0 0;
 }
 
 .workbench-grid.reader-focused .database-panel,
@@ -1654,6 +1662,52 @@ kbd {
   border: 0;
   opacity: 0;
   pointer-events: none;
+}
+
+.reader-resize-handle {
+  cursor: col-resize;
+  min-width: 0;
+  position: relative;
+  touch-action: none;
+  z-index: 14;
+}
+
+.reader-resize-handle::before {
+  background: var(--line);
+  bottom: 0;
+  content: "";
+  left: 50%;
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  transition: background 120ms ease, width 120ms ease;
+  width: 1px;
+}
+
+.reader-resize-handle:hover::before,
+.reader-resize-handle:focus-visible::before,
+body.reader-panel-resizing .reader-resize-handle::before {
+  background: var(--teal);
+  width: 3px;
+}
+
+.reader-resize-handle:focus-visible {
+  outline: none;
+}
+
+.reader-closed .reader-resize-handle,
+.reader-focused .reader-resize-handle {
+  display: none;
+}
+
+body.reader-panel-resizing,
+body.reader-panel-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.reader-panel-resizing .workbench-grid {
+  transition: none;
 }
 
 .reader-panel,
@@ -1669,7 +1723,7 @@ kbd {
   --reader-font-size: 17px;
   --reader-line-height: 1.9;
   background: #fbfaf7;
-  border-right: 1px solid var(--line);
+  border-right: 0;
   color: #373a38;
   display: flex;
   flex-direction: column;
@@ -1939,7 +1993,15 @@ kbd {
 .reader-copy > * {
   margin-left: auto;
   margin-right: auto;
+}
+
+.reader-copy > :not(h1) {
   max-width: var(--reader-content-width);
+}
+
+.reader-copy > h1 {
+  max-width: none;
+  width: 100%;
 }
 
 .reader-copy p.reader-block.chinese {
@@ -3436,8 +3498,13 @@ kbd {
   }
 
   .reader-panel {
+    border-right: 1px solid var(--line);
     left: 0;
     width: min(390px, 88vw);
+  }
+
+  .reader-resize-handle {
+    display: none;
   }
 
   .inspector-panel {
