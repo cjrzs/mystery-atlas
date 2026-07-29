@@ -331,6 +331,7 @@ class AnalysisCheckpoint(BaseModel):
     chapter_work: dict[str, ChapterWorkCheckpoint] = Field(default_factory=dict)
     parts: list[PartSynthesis] = Field(default_factory=list)
     claim_merge_batches: dict[str, ClaimMergeResult] = Field(default_factory=dict)
+    claim_merge_splits: set[str] = Field(default_factory=set)
     book_claims: list[ClaimFinding] | None = None
     claim_contradictions: list[str] = Field(default_factory=list)
     claim_uncertainties: list[str] = Field(default_factory=list)
@@ -340,6 +341,7 @@ class AnalysisCheckpoint(BaseModel):
     editorial_interpretation: BookInterpretationEditorial | None = None
     editorial_mysteries: BookMysteryEditorial | None = None
     claim_audit_batches: dict[str, ClaimAuditResult] = Field(default_factory=dict)
+    claim_audit_splits: set[str] = Field(default_factory=set)
     synthesis: BookSynthesis | None = None
     reconciliation: ReconciliationResult | None = None
 

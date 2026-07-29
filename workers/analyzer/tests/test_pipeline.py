@@ -481,6 +481,108 @@ def test_claim_merge_splits_a_truncated_batch_without_repeating_it(
     assert "layer=0" in caplog.text
 
 
+def test_claim_merge_resume_skips_a_parent_already_marked_for_split() -> None:
+    citations = [
+        SourceCitation(
+            chapter=chapter,
+            excerpt=f"Verified excerpt {chapter}.",
+            start_char=chapter * 10,
+            end_char=chapter * 10 + 20,
+            verified=True,
+        )
+        for chapter in (1, 2)
+    ]
+    parts = [
+        PartSynthesis(
+            chapter_numbers=[1, 2],
+            summary="Two findings.",
+            claims=[
+                ClaimFinding(
+                    statement=f"Finding {chapter}.",
+                    kind="author_explicit",
+                    introduced_chapter=chapter,
+                    citations=[source],
+                )
+                for chapter, source in zip((1, 2), citations, strict=True)
+            ],
+        )
+    ]
+    catalog = pipeline._verified_citation_catalog(parts)
+    candidates = pipeline._claim_candidates(parts, catalog)
+
+    class FailsSecondLeafOnce:
+        def __init__(self) -> None:
+            self.fail_second = True
+            self.calls = 0
+            self.leaf_calls = 0
+
+        def generate(self, *, task, system, prompt, response_model, model, temperature=0.1):
+            del system, response_model, model, temperature
+            assert task == "book_claim_merge"
+            self.calls += 1
+            claim_ids = list(dict.fromkeys(re.findall(r'"claim_id":\s*"([^"]+)"', prompt)))
+            if len(claim_ids) > 1:
+                raise ModelOutputTruncatedError("provider length")
+            self.leaf_calls += 1
+            if self.fail_second and self.leaf_calls == 2:
+                raise ModelOutputTruncatedError("provider length")
+            candidate = next(item for item in candidates if item["claim_id"] == claim_ids[0])
+            return contracts.ClaimMergeResult(
+                claims=[
+                    contracts.ClaimMergeDecision(
+                        statement=candidate["statement"],
+                        kind=candidate["kind"],
+                        introduced_chapter=candidate["introduced_chapter"],
+                        source_claim_ids=claim_ids,
+                    )
+                ]
+            )
+
+    adapter = FailsSecondLeafOnce()
+    cached: dict[str, contracts.ClaimMergeResult] = {}
+    split_keys: set[str] = set()
+    with pytest.raises(ModelOutputTruncatedError):
+        pipeline._merge_claims_adaptively(
+            adapter,
+            model="reading",
+            candidates=candidates,
+            catalog=catalog,
+            cached_batches=cached,
+            split_keys=split_keys,
+        )
+    calls_after_failure = adapter.calls
+
+    adapter.fail_second = False
+    claims, _, _ = pipeline._merge_claims_adaptively(
+        adapter,
+        model="reading",
+        candidates=candidates,
+        catalog=catalog,
+        cached_batches=cached,
+        split_keys=split_keys,
+    )
+
+    assert adapter.calls == calls_after_failure + 1
+    assert len(claims) == 2
+
+
+def test_people_combiner_preserves_same_name_decisions_with_shared_evidence() -> None:
+    person = contracts.ChapterPersonDecision(
+        name="John",
+        first_chapter=1,
+        evidence_ids=["ev-shared"],
+    )
+
+    combined = pipeline._combine_chapter_people_relations(
+        [
+            contracts.ChapterPeopleRelationsResult(people=[person]),
+            contracts.ChapterPeopleRelationsResult(people=[person]),
+        ]
+    )
+
+    assert len(combined.people) == 2
+
+
 def test_minimum_claim_batch_retries_content_idle_once() -> None:
     source = SourceCitation(
         chapter=1,

@@ -535,6 +535,8 @@ def _merge_claims_adaptively(
     max_concurrency: int = 1,
     layer: int = 0,
     parent_batch_id: str | None = None,
+    split_keys: set[str] | None = None,
+    on_split_decided: Callable[[str], None] | None = None,
 ) -> tuple[list[ClaimFinding], list[str], list[str]]:
     if not candidates:
         return [], [], []
@@ -568,6 +570,8 @@ def _merge_claims_adaptively(
                 max_concurrency=1,
                 layer=layer + 1,
                 parent_batch_id=batch_key,
+                split_keys=split_keys,
+                on_split_decided=on_split_decided,
             )
 
         if max_concurrency > 1 and len(batches) > 1:
@@ -594,6 +598,8 @@ def _merge_claims_adaptively(
                 max_concurrency=max_concurrency,
                 layer=layer + 1,
                 parent_batch_id=batch_key,
+                split_keys=split_keys,
+                on_split_decided=on_split_decided,
             )
             return (
                 next_level[0],
@@ -680,6 +686,8 @@ def _merge_claims_adaptively(
         on_completed=on_batch,
         on_split=log_split,
         cache_combined=False,
+        split_keys=split_keys,
+        on_split_decided=on_split_decided,
     )
     return (
         _apply_claim_merge(result, candidates, catalog),
@@ -840,6 +848,42 @@ def _resolved_chapter_title(
     return f"{source}｜{suggestion[:60]}" if source else suggestion[:80]
 
 
+def _combine_chapter_people_relations(
+    results: list[ChapterPeopleRelationsResult],
+) -> ChapterPeopleRelationsResult:
+    # Entity identity is not implied by a shared display name or citation. The
+    # bounded model task may deduplicate within one response, but independently
+    # synthesized subgroups stay separate without an explicit equivalence ID.
+    people = [person for result in results for person in result.people]
+    relations: dict[tuple[str, str, str, str, int], Any] = {}
+    for result in results:
+        for relation in result.relations:
+            key = (
+                relation.source.casefold(),
+                relation.target.casefold(),
+                relation.label.casefold(),
+                relation.kind,
+                relation.first_chapter,
+            )
+            current = relations.get(key)
+            if current is None:
+                relations[key] = relation
+                continue
+            relations[key] = current.model_copy(
+                update={
+                    "evidence_ids": list(
+                        dict.fromkeys(
+                            [*current.evidence_ids, *relation.evidence_ids]
+                        )
+                    )
+                }
+            )
+    return ChapterPeopleRelationsResult(
+        people=people,
+        relations=list(relations.values()),
+    )
+
+
 def _synthesize_chapter(
     adapter: ModelAdapter,
     config: PipelineConfig,
@@ -997,53 +1041,7 @@ def _synthesize_chapter(
     def merge_people_relations(
         results: list[ChapterPeopleRelationsResult],
     ) -> ChapterPeopleRelationsResult:
-        people: dict[tuple[str, int, tuple[str, ...]], Any] = {}
-        relations: dict[tuple[str, str, str, str, int], Any] = {}
-        for result in results:
-            for person in result.people:
-                key = (
-                    person.name.casefold(),
-                    person.first_chapter,
-                    tuple(sorted(dict.fromkeys(person.evidence_ids))),
-                )
-                current = people.get(key)
-                if current is None:
-                    people[key] = person
-                    continue
-                people[key] = current.model_copy(
-                    update={
-                        "aliases": list(dict.fromkeys([*current.aliases, *person.aliases])),
-                        "evidence_ids": list(
-                            dict.fromkeys(
-                                [*current.evidence_ids, *person.evidence_ids]
-                            )
-                        ),
-                    }
-                )
-            for relation in result.relations:
-                key = (
-                    relation.source.casefold(),
-                    relation.target.casefold(),
-                    relation.label.casefold(),
-                    relation.kind,
-                    relation.first_chapter,
-                )
-                current = relations.get(key)
-                if current is None:
-                    relations[key] = relation
-                    continue
-                relations[key] = current.model_copy(
-                    update={
-                        "evidence_ids": list(
-                            dict.fromkeys(
-                                [*current.evidence_ids, *relation.evidence_ids]
-                            )
-                        )
-                    }
-                )
-        return ChapterPeopleRelationsResult(
-            people=list(people.values()), relations=list(relations.values())
-        )
+        return _combine_chapter_people_relations(results)
 
     def merge_events(results: list[ChapterEventsResult]) -> ChapterEventsResult:
         events: dict[tuple[int, str], Any] = {}
@@ -1826,6 +1824,8 @@ def _audit_claims_adaptively(
     on_batch: Callable[[str, ClaimAuditResult], None] | None = None,
     max_batch_chars: int = 40_000,
     max_concurrency: int = 1,
+    split_keys: set[str] | None = None,
+    on_split_decided: Callable[[str], None] | None = None,
 ) -> ReconciliationResult:
     if not claims:
         return ReconciliationResult()
@@ -1847,6 +1847,8 @@ def _audit_claims_adaptively(
                 on_batch=on_batch,
                 max_batch_chars=max_batch_chars,
                 max_concurrency=1,
+                split_keys=split_keys,
+                on_split_decided=on_split_decided,
             )
 
         if max_concurrency > 1 and len(batches) > 1:
@@ -1908,6 +1910,8 @@ def _audit_claims_adaptively(
         cached=cached_batches,
         on_completed=on_batch,
         cache_combined=False,
+        split_keys=split_keys,
+        on_split_decided=on_split_decided,
     )
     return _apply_claim_audit(claims, audit)
 
@@ -2214,6 +2218,7 @@ def analyze_book(
         if claims is None:
             candidates = _claim_candidates(verified_parts, citation_catalog)
             claim_batches = dict(active_checkpoint.claim_merge_batches)
+            claim_splits = set(active_checkpoint.claim_merge_splits)
 
             def save_claim_batch(key: str, result: ClaimMergeResult) -> None:
                 claim_batches[key] = result
@@ -2227,6 +2232,10 @@ def analyze_book(
                     f"{completed} claim {batch_label} merged",
                 )
 
+            def save_claim_split(key: str) -> None:
+                claim_splits.add(key)
+                save_checkpoint(claim_merge_splits=set(claim_splits))
+
             claims, claim_contradictions, claim_uncertainties = (
                 _merge_claims_adaptively(
                     adapter,
@@ -2237,6 +2246,8 @@ def analyze_book(
                     on_batch=save_claim_batch,
                     max_batch_chars=config.synthesis_batch_chars,
                     max_concurrency=config.max_concurrency,
+                    split_keys=claim_splits,
+                    on_split_decided=save_claim_split,
                 )
             )
             save_checkpoint(
@@ -2348,6 +2359,7 @@ def analyze_book(
         )
         if verified_synthesis.claims:
             audit_batches = dict(active_checkpoint.claim_audit_batches)
+            audit_splits = set(active_checkpoint.claim_audit_splits)
 
             def save_audit_batch(key: str, result: ClaimAuditResult) -> None:
                 audit_batches[key] = result
@@ -2361,6 +2373,10 @@ def analyze_book(
                     f"{completed} claim audit {batch_label} completed",
                 )
 
+            def save_audit_split(key: str) -> None:
+                audit_splits.add(key)
+                save_checkpoint(claim_audit_splits=set(audit_splits))
+
             reconciliation = _audit_claims_adaptively(
                 adapter,
                 model=config.reconciliation_model,
@@ -2370,6 +2386,8 @@ def analyze_book(
                 on_batch=save_audit_batch,
                 max_batch_chars=config.synthesis_batch_chars,
                 max_concurrency=config.max_concurrency,
+                split_keys=audit_splits,
+                on_split_decided=save_audit_split,
             )
         else:
             reconciliation = ReconciliationResult()
