@@ -7,7 +7,6 @@ from .contracts import AnalysisProgress
 from .pipeline import ANALYSIS_STAGES
 from .runner import run_analysis_job
 
-
 REDIS_URL = os.getenv("MYSTERY_ATLAS_REDIS_URL", "redis://localhost:6379/0")
 app = Celery("mystery_atlas_analyzer", broker=REDIS_URL, backend=REDIS_URL)
 
@@ -22,8 +21,11 @@ def analyze_edition(
 ) -> dict[str, Any]:
     """Run the complete versioned whole-book analysis for one persisted job."""
 
+    celery_task_id = task.request.id
+
     def update_celery_state(progress: AnalysisProgress) -> None:
         task.update_state(
+            task_id=celery_task_id,
             state="PROGRESS",
             meta={
                 "job_id": job_id,
