@@ -4,6 +4,7 @@ from pathlib import Path
 from threading import Event
 
 import pytest
+from fastapi import BackgroundTasks
 from mystery_atlas_analyzer.contracts import (
     AnalysisCheckpoint,
     BookEditorial,
@@ -36,6 +37,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Session
 
 from mystery_atlas_api import analysis_dispatch
+from mystery_atlas_api.config import Settings as ApiSettings
 from mystery_atlas_api.database import Base
 from mystery_atlas_api.models import (
     AnalysisJob,
@@ -434,6 +436,41 @@ def test_stale_running_jobs_become_failed_without_losing_their_stage(
         assert stale.progress == 70
         assert "heartbeat" in (stale.error or "")
         assert fresh.status == "running"
+
+
+def test_scheduling_a_retry_clears_stale_runtime_telemetry() -> None:
+    stale_heartbeat = datetime.now(UTC) - timedelta(minutes=10)
+    job = AnalysisJob(
+        id="retry-job",
+        work_id="work-id",
+        edition_id="edition-id",
+        track="full",
+        status="failed",
+        stage="chapter_synthesis",
+        progress=43,
+        error="analysis worker heartbeat expired",
+        heartbeat_at=stale_heartbeat,
+        current_call_id="stale-call",
+        response_chars=12_345,
+        content_idle_seconds=42,
+    )
+
+    status = analysis_dispatch.schedule_analysis(
+        job,
+        BackgroundTasks(),
+        ApiSettings(
+            ai_base_url="https://unused.test/v1",
+            ai_reading_model="test-model",
+            analysis_execution="celery",
+        ),
+        resume=True,
+    )
+
+    assert status == "queued"
+    assert job.heartbeat_at is None
+    assert job.current_call_id is None
+    assert job.response_chars == 0
+    assert job.content_idle_seconds == 0
 
 
 def test_stale_analysis_watchdog_runs_and_can_be_stopped(monkeypatch) -> None:

@@ -200,6 +200,13 @@ def _send_to_celery(job_id: str) -> None:
     app.send_task("analyzer.analyze_edition", args=[job_id])
 
 
+def _reset_runtime_telemetry(job: AnalysisJob) -> None:
+    job.heartbeat_at = None
+    job.current_call_id = None
+    job.response_chars = 0
+    job.content_idle_seconds = 0
+
+
 def schedule_analysis(
     job: AnalysisJob,
     background_tasks: BackgroundTasks,
@@ -219,6 +226,7 @@ def schedule_analysis(
         )
         return job.status
 
+    _reset_runtime_telemetry(job)
     job.status = "queued"
     if not resume:
         job.stage = "source_validation"
@@ -249,6 +257,7 @@ def resume_waiting_analyses(settings: Settings | None = None) -> int:
         )
         job_ids = [job.id for job in jobs]
         for job in jobs:
+            _reset_runtime_telemetry(job)
             job.status = "queued"
             job.error = None
         session.commit()
