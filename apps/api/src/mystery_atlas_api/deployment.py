@@ -67,6 +67,12 @@ def _copy_legacy_uploads(
                 .where(book_imports.c.id == row["id"])
                 .values(stored_path=target.as_posix())
             )
+        elif target.is_file():
+            target_connection.execute(
+                update(book_imports)
+                .where(book_imports.c.id == row["id"])
+                .values(stored_path=target.as_posix())
+            )
         elif row["status"] == "completed":
             missing.append(row["id"])
     return copied, missing

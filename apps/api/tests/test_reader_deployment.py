@@ -119,3 +119,67 @@ def test_legacy_sqlite_migration_copies_rows_missing_new_columns(
         ).mappings().one()
     assert migrated["email"] == "legacy@example.com"
     assert migrated["reader_preferences"] == {}
+
+
+def test_legacy_migration_accepts_upload_already_in_target_volume(
+    tmp_path: Path,
+) -> None:
+    legacy_database = tmp_path / "legacy.db"
+    legacy_uploads = tmp_path / "legacy-uploads"
+    target_uploads = tmp_path / "target-uploads"
+    legacy_uploads.mkdir()
+    with sa.create_engine(f"sqlite:///{legacy_database.as_posix()}").begin():
+        pass
+
+    target_database = tmp_path / "target.db"
+    target_url = f"sqlite:///{target_database.as_posix()}"
+    target_engine = sa.create_engine(target_url)
+    Base.metadata.create_all(target_engine)
+    users = Base.metadata.tables["users"]
+    book_imports = Base.metadata.tables["book_imports"]
+    stored_path = "/data/uploads/reader/existing.epub"
+    with target_engine.begin() as connection:
+        connection.execute(
+            users.insert(),
+            {
+                "id": "reader",
+                "email": "reader@example.com",
+                "password_hash": "hash",
+                "display_name": "Reader",
+            },
+        )
+        connection.execute(
+            book_imports.insert(),
+            {
+                "id": "existing-import",
+                "user_id": "reader",
+                "original_name": "existing.epub",
+                "stored_path": stored_path,
+                "source_format": "epub",
+                "size_bytes": 7,
+                "content_hash": "hash",
+                "status": "completed",
+            },
+        )
+
+    target_file = target_uploads / "reader" / "existing.epub"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_bytes(b"content")
+
+    report = migrate_legacy_data(
+        legacy_database=legacy_database,
+        legacy_upload_root=legacy_uploads,
+        target_upload_root=target_uploads,
+        target_database_url=target_url,
+    )
+
+    assert report["status"] == "target_not_empty"
+    assert report["copied_uploads"] == 0
+    assert report["missing_uploads"] == []
+    with target_engine.connect() as connection:
+        migrated_path = connection.scalar(
+            sa.select(book_imports.c.stored_path).where(
+                book_imports.c.id == "existing-import"
+            )
+        )
+    assert migrated_path == target_file.as_posix()
