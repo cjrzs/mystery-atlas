@@ -130,6 +130,14 @@ class ReaderBlock(BaseModel):
     missing: bool = False
 
 
+class ReaderChapterSummary(BaseModel):
+    number: int
+    title: str
+    characters: int
+    structural_path: list[str] = Field(default_factory=list)
+    content_type: str = "chapter"
+
+
 class ReaderChapter(BaseModel):
     number: int
     title: str
@@ -153,7 +161,7 @@ class ReaderResponse(BaseModel):
     edition_title: str
     language: str
     visibility: str
-    chapters: list[ReaderChapter]
+    chapters: list[ReaderChapterSummary]
     structure_version: str = ""
     structure_source: str = ""
     structure_confidence: str = ""

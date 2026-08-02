@@ -227,6 +227,22 @@ test("reader exposes a chapter directory and resets scroll after chapter changes
   );
 });
 
+test("reader loads one chapter at a time and prefetches adjacent chapters", async () => {
+  const workbench = await source("apps/web/src/components/workbench.tsx");
+  const apiTypes = await source("apps/web/src/lib/api.ts");
+
+  assert.match(apiTypes, /type ReaderChapterSummary/);
+  assert.match(apiTypes, /chapters:\s*ReaderChapterSummary\[\]/);
+  assert.match(workbench, /readerChapterCache/);
+  assert.match(
+    workbench,
+    /`\$\{readerPath\}\/chapters\/\$\{chapterNumber\}`/,
+  );
+  assert.match(workbench, /prefetchReaderChapter/);
+  assert.match(workbench, /readerChapterNumber - 1/);
+  assert.match(workbench, /readerChapterNumber \+ 1/);
+});
+
 test("character graph is organized around structural core people", async () => {
   const graph = await source("apps/web/src/components/character-graph.tsx");
 

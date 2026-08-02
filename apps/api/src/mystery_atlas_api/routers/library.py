@@ -9,11 +9,12 @@ from ..config import get_settings
 from ..database import get_session
 from ..demo import WORKS
 from ..models import AnalysisJob, BookImport, Edition, PrivateLibraryBook, User, Work
-from ..parsers import ensure_chapter_blocks
+from ..reader_views import reader_chapter, reader_response
 from ..schemas import (
     AnalysisJobDetailResponse,
     LibraryItemResponse,
     ProgressUpdate,
+    ReaderChapter,
     ReaderResponse,
     WorkbenchAnalysisResponse,
 )
@@ -116,6 +117,15 @@ def get_private_reader(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> ReaderResponse:
+    _, work, edition, book_import = private_reader_source(item_id, user, session)
+    return reader_response(work, edition, book_import)
+
+
+def private_reader_source(
+    item_id: str,
+    user: User,
+    session: Session,
+) -> tuple[PrivateLibraryBook, Work, Edition, BookImport]:
     item = session.get(PrivateLibraryBook, item_id)
     if item is None or item.user_id != user.id:
         raise HTTPException(status_code=404, detail="私人档案不存在")
@@ -130,25 +140,25 @@ def get_private_reader(
     )
     if book_import is None:
         raise HTTPException(status_code=404, detail="版本正文不可用")
-    return ReaderResponse(
-        work_id=work.id,
-        work_slug=work.slug,
-        work_title=work.title,
-        author=work.author,
-        edition_id=edition.id,
-        edition_title=edition.title,
-        language=edition.language,
-        visibility=edition.visibility,
-        chapters=[
-            ensure_chapter_blocks(chapter, source_format=book_import.source_format)
-            for chapter in book_import.chapters
-        ],
-        structure_version=book_import.structure_version or "",
-        structure_source=book_import.structure_source or "",
-        structure_confidence=book_import.structure_confidence,
-        structure_warnings=list(book_import.structure_warnings or []),
-        structure_requires_review=book_import.structure_requires_review,
-    )
+    return item, work, edition, book_import
+
+
+@router.get(
+    "/{item_id}/reader/chapters/{chapter_number}",
+    response_model=ReaderChapter,
+    response_model_exclude_unset=True,
+)
+def get_private_reader_chapter(
+    item_id: str,
+    chapter_number: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> ReaderChapter:
+    _, _, _, book_import = private_reader_source(item_id, user, session)
+    chapter = reader_chapter(book_import, chapter_number)
+    if chapter is None:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    return chapter
 
 
 @router.get("/{item_id}/analysis", response_model=WorkbenchAnalysisResponse)

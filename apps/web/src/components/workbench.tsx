@@ -46,6 +46,7 @@ import {
   type LibraryItem,
   type ReaderBook,
   type ReaderBlock,
+  type ReaderChapter,
   type ReaderPreferences,
   type WorkbenchAnalysis,
 } from "@/lib/api";
@@ -133,6 +134,7 @@ export function Workbench({
     { role: "user" | "assistant"; text: string }[]
   >([]);
   const [readerBook, setReaderBook] = useState<ReaderBook | null>(null);
+  const [readerChapter, setReaderChapter] = useState<ReaderChapter | null>(null);
   const [readerState, setReaderState] = useState<LoadState>("loading");
   const [readerError, setReaderError] = useState("");
   const [readerChapterNumber, setReaderChapterNumber] = useState(1);
@@ -148,7 +150,16 @@ export function Workbench({
   const workbenchGridRef = useRef<HTMLDivElement | null>(null);
   const readerPanelRef = useRef<HTMLElement | null>(null);
   const readerCopyRef = useRef<HTMLElement | null>(null);
+  const readerChapterCache = useRef(new Map<string, ReaderChapter>());
+  const readerChapterRequests = useRef(
+    new Map<string, Promise<ReaderChapter>>(),
+  );
   const currentPreferencesOwner = user?.id ?? "guest";
+  const readerPath = libraryItemId
+    ? `/library/${libraryItemId}/reader`
+    : slug
+      ? `/works/${slug}/reader`
+      : "";
 
   useEffect(() => {
     let active = true;
@@ -233,12 +244,9 @@ export function Workbench({
   }, [readerPanelRatio, readerPanelRatioReady]);
 
   useEffect(() => {
-    if (!slug && !libraryItemId) return;
+    if (!readerPath) return;
     let active = true;
-    const path = libraryItemId
-      ? `/library/${libraryItemId}/reader`
-      : `/works/${slug}/reader`;
-    apiRequest<ReaderBook>(path)
+    apiRequest<ReaderBook>(readerPath)
       .then(async (book) => {
         if (!active) return;
         const normalizedBook = normalizeReaderBook(book);
@@ -264,11 +272,11 @@ export function Workbench({
         setReaderBook(normalizedBook);
         setReaderChapterNumber(boundedChapter);
         setChapter(boundedChapter);
-        setReaderState("ready");
       })
       .catch((caught) => {
         if (!active) return;
         setReaderBook(null);
+        setReaderChapter(null);
         setReaderState("error");
         setReaderError(
           caught instanceof Error ? caught.message : "无法读取这本书的正文",
@@ -277,7 +285,82 @@ export function Workbench({
     return () => {
       active = false;
     };
-  }, [libraryItemId, slug, user]);
+  }, [libraryItemId, readerPath, user]);
+
+  useEffect(() => {
+    if (!readerBook || !readerPath) return;
+    let active = true;
+
+    const cacheKey = (chapterNumber: number) =>
+      `${readerBook.edition_id}:${chapterNumber}`;
+    const fetchReaderChapter = (chapterNumber: number) => {
+      const key = cacheKey(chapterNumber);
+      const cached = readerChapterCache.current.get(key);
+      if (cached) return Promise.resolve(cached);
+      const pending = readerChapterRequests.current.get(key);
+      if (pending) return pending;
+
+      const request = apiRequest<ReaderChapter>(
+        `${readerPath}/chapters/${chapterNumber}`,
+      )
+        .then(normalizeReaderChapter)
+        .then((loadedChapter) => {
+          readerChapterCache.current.set(key, loadedChapter);
+          return loadedChapter;
+        })
+        .finally(() => {
+          readerChapterRequests.current.delete(key);
+        });
+      readerChapterRequests.current.set(key, request);
+      return request;
+    };
+    const prefetchReaderChapter = (chapterNumber: number) => {
+      if (!readerBook.chapters.some((item) => item.number === chapterNumber)) {
+        return;
+      }
+      void fetchReaderChapter(chapterNumber)
+        .catch(() => undefined);
+    };
+
+    const loadReaderChapter = async () => {
+      const key = cacheKey(readerChapterNumber);
+      const cached = readerChapterCache.current.get(key);
+      setReaderError("");
+      if (cached) {
+        setReaderChapter(cached);
+        setReaderState("ready");
+      } else {
+        setReaderChapter(null);
+        setReaderState("loading");
+        try {
+          const loadedChapter = await fetchReaderChapter(readerChapterNumber);
+          if (!active) return;
+          setReaderChapter(loadedChapter);
+          setReaderState("ready");
+        } catch (caught) {
+          if (!active) return;
+          setReaderChapter(null);
+          setReaderState("error");
+          setReaderError(
+            caught instanceof Error ? caught.message : "无法读取这一章的正文",
+          );
+          return;
+        }
+      }
+
+      for (const adjacentChapter of [
+        readerChapterNumber - 1,
+        readerChapterNumber + 1,
+      ]) {
+        prefetchReaderChapter(adjacentChapter);
+      }
+    };
+
+    void loadReaderChapter();
+    return () => {
+      active = false;
+    };
+  }, [readerBook, readerChapterNumber, readerPath]);
 
   useEffect(() => {
     if (!readerBook || (!slug && !libraryItemId)) return;
@@ -333,9 +416,6 @@ export function Workbench({
     };
   }, [analysisRefresh, chapter, libraryItemId, readerBook, slug]);
 
-  const readerChapter = readerBook?.chapters.find(
-    (item) => item.number === readerChapterNumber,
-  );
   const readerMaxChapter = Math.max(readerBook?.chapters.length ?? 0, 1);
   const readerBlocks = readerChapter
     ? normalizedReaderBlocks(readerChapter.blocks, readerChapter.text)
@@ -1211,9 +1291,16 @@ function normalizeReaderBook(book: ReaderBook): ReaderBook {
     ...book,
     chapters: (book.chapters ?? []).map((item) => ({
       ...item,
-      blocks: item.blocks ?? [],
       structural_path: item.structural_path ?? [],
     })),
+  };
+}
+
+function normalizeReaderChapter(chapter: ReaderChapter): ReaderChapter {
+  return {
+    ...chapter,
+    blocks: chapter.blocks ?? [],
+    structural_path: chapter.structural_path ?? [],
   };
 }
 

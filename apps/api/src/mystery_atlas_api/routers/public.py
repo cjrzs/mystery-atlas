@@ -15,11 +15,12 @@ from ..models import (
     User,
     Work,
 )
-from ..parsers import ensure_chapter_blocks
+from ..reader_views import reader_chapter, reader_response
 from ..schemas import (
     GraphEdge,
     GraphNode,
     GraphSnapshot,
+    ReaderChapter,
     ReaderResponse,
     WorkbenchAnalysisResponse,
     WorkSummary,
@@ -106,6 +107,15 @@ def get_reader(
     edition_id: str | None = None,
     session: Session = Depends(get_session),
 ) -> ReaderResponse:
+    work, edition, book_import = public_reader_source(slug, edition_id, session)
+    return reader_response(work, edition, book_import)
+
+
+def public_reader_source(
+    slug: str,
+    edition_id: str | None,
+    session: Session,
+) -> tuple[Work, Edition, BookImport]:
     work = session.scalar(
         select(Work).where(Work.slug == slug, Work.visibility == "public")
     )
@@ -129,25 +139,25 @@ def get_reader(
     )
     if book_import is None:
         raise HTTPException(status_code=404, detail="版本正文不可用")
-    return ReaderResponse(
-        work_id=work.id,
-        work_slug=work.slug,
-        work_title=work.title,
-        author=work.author,
-        edition_id=edition.id,
-        edition_title=edition.title,
-        language=edition.language,
-        visibility=edition.visibility,
-        chapters=[
-            ensure_chapter_blocks(chapter, source_format=book_import.source_format)
-            for chapter in book_import.chapters
-        ],
-        structure_version=book_import.structure_version or "",
-        structure_source=book_import.structure_source or "",
-        structure_confidence=book_import.structure_confidence,
-        structure_warnings=list(book_import.structure_warnings or []),
-        structure_requires_review=book_import.structure_requires_review,
-    )
+    return work, edition, book_import
+
+
+@router.get(
+    "/{slug}/reader/chapters/{chapter_number}",
+    response_model=ReaderChapter,
+    response_model_exclude_unset=True,
+)
+def get_reader_chapter(
+    slug: str,
+    chapter_number: int,
+    edition_id: str | None = None,
+    session: Session = Depends(get_session),
+) -> ReaderChapter:
+    _, _, book_import = public_reader_source(slug, edition_id, session)
+    chapter = reader_chapter(book_import, chapter_number)
+    if chapter is None:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    return chapter
 
 
 @router.get("/{slug}/analysis", response_model=WorkbenchAnalysisResponse)

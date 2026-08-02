@@ -97,6 +97,14 @@ export type ReaderChapter = {
   structure_warnings: string[];
 };
 
+export type ReaderChapterSummary = {
+  number: number;
+  title: string;
+  characters: number;
+  structural_path: string[];
+  content_type: string;
+};
+
 export type ReaderBlock = {
   type:
     | "paragraph"
@@ -127,7 +135,7 @@ export type ReaderBook = {
   edition_title: string;
   language: string;
   visibility: string;
-  chapters: ReaderChapter[];
+  chapters: ReaderChapterSummary[];
   structure_version: string;
   structure_source: string;
   structure_confidence: string;

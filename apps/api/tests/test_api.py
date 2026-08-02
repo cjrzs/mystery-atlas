@@ -131,16 +131,36 @@ def test_upload_and_parse_txt(client: TestClient) -> None:
     reader = client.get(f"/api/v1/works/{uploaded['slug']}/reader")
     assert reader.status_code == 200
     assert len(reader.json()["chapters"]) == 2
-    assert "沈砚" in reader.json()["chapters"][0]["text"]
-    assert reader.json()["chapters"][0]["blocks"] == [
+    assert "text" not in reader.json()["chapters"][0]
+    assert "blocks" not in reader.json()["chapters"][0]
+    public_chapter = client.get(
+        f"/api/v1/works/{uploaded['slug']}/reader/chapters/1"
+    )
+    assert public_chapter.status_code == 200
+    assert "沈砚" in public_chapter.json()["text"]
+    assert public_chapter.json()["blocks"] == [
         {"type": "paragraph", "text": "沈砚在夜里抵达钟楼。"}
     ]
-    assert reader.json()["chapters"][0]["structural_path"] == []
+    assert public_chapter.json()["structural_path"] == []
+    assert client.get(
+        f"/api/v1/works/{uploaded['slug']}/reader/chapters/999"
+    ).status_code == 404
 
     library = client.get("/api/v1/library")
     assert library.status_code == 200
     library_item = next(item for item in library.json() if item["title"] == "雾港测试")
     assert library_item["tags"] == ["本格", "密室"]
+    private_reader = client.get(
+        f"/api/v1/library/{library_item['id']}/reader"
+    )
+    assert private_reader.status_code == 200
+    assert "text" not in private_reader.json()["chapters"][0]
+    assert "blocks" not in private_reader.json()["chapters"][0]
+    private_chapter = client.get(
+        f"/api/v1/library/{library_item['id']}/reader/chapters/1"
+    )
+    assert private_chapter.status_code == 200
+    assert private_chapter.json() == public_chapter.json()
 
     feedback = client.post(
         "/api/v1/feedback",
