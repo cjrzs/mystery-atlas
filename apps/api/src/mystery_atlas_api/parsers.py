@@ -40,6 +40,7 @@ NON_MAINLINE_EXACT_TITLES = {
     "appendix",
     "封面",
     "扉页",
+    "书名页",
     "目录",
     "版权",
     "出版说明",
@@ -87,7 +88,8 @@ BLOCK_TAG_TYPES = {
 }
 DIVIDER_PATTERN = re.compile(r"^\s*(?:[-—_=·*#]\s*){3,}$")
 CHINESE_CHARACTER_PATTERN = re.compile(r"[\u3400-\u9fff]")
-EPUB_PARSER_VERSION = "epub-structure-v1"
+EPUB_PARSER_VERSION = "epub-structure-v2"
+NAVIGATION_TITLE_PAGE_MAX_CHARACTERS = 200
 NOTE_SEMANTICS = {"footnote", "endnote", "rearnote"}
 NON_MAINLINE_SEMANTICS = {
     "cover",
@@ -1009,6 +1011,32 @@ def strip_matching_heading(blocks: list[dict], title: str) -> list[dict]:
     return blocks
 
 
+def is_navigation_title_page(blocks: list[dict], title: str) -> bool:
+    text = blocks_to_analysis_text(blocks).strip()
+    normalized_title = normalize_section_title(title)
+    normalized_text = normalize_section_title(text)
+    if not normalized_title:
+        return False
+    return bool(
+        not normalized_text
+        or normalized_text == normalized_title
+        or (
+            len(text) <= NAVIGATION_TITLE_PAGE_MAX_CHARACTERS
+            and normalized_text.startswith(normalized_title)
+        )
+    )
+
+
+def strip_leading_matching_title(blocks: list[dict], title: str) -> list[dict]:
+    if (
+        blocks
+        and normalize_section_title(str(blocks[0].get("text") or ""))
+        == normalize_section_title(title)
+    ):
+        return blocks[1:]
+    return blocks
+
+
 def chapters_from_navigation(
     nodes: list[dict],
     documents: dict[str, dict],
@@ -1023,6 +1051,11 @@ def chapters_from_navigation(
     if not leaves:
         return [], "low", ["目录没有产生可定位的正文章节"]
 
+    navigation_resources = {str(node["resource"]) for node in valid_nodes}
+    documents_by_spine = {
+        int(document["spine_index"]): (resource, document)
+        for resource, document in documents.items()
+    }
     starts: dict[int, int] = {}
     for index, leaf in enumerate(leaves):
         document = documents[str(leaf["resource"])]
@@ -1056,6 +1089,25 @@ def chapters_from_navigation(
         ):
             heading_matches += 1
         blocks = strip_matching_heading(raw_blocks, title)
+        fragment = str(leaf.get("fragment") or "")
+        if (
+            not fragment
+            and not later_starts
+            and is_navigation_title_page(raw_blocks, title)
+        ):
+            adjacent = documents_by_spine.get(int(document["spine_index"]) + 1)
+            if adjacent is not None:
+                adjacent_resource, adjacent_document = adjacent
+                adjacent_blocks = list(adjacent_document["blocks"])
+                if (
+                    adjacent_resource not in navigation_resources
+                    and adjacent_document["linear"]
+                    and blocks_to_analysis_text(adjacent_blocks).strip()
+                ):
+                    blocks = [
+                        *strip_leading_matching_title(raw_blocks, title),
+                        *adjacent_blocks,
+                    ]
         text = blocks_to_analysis_text(blocks).strip()
         if not text:
             continue

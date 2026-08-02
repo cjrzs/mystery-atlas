@@ -152,6 +152,82 @@ def write_nested_ncx_epub(path: Path) -> None:
             archive.writestr(f"OEBPS/{href}", html)
 
 
+def write_split_title_body_ncx_epub(path: Path) -> None:
+    container = """<?xml version="1.0" encoding="UTF-8"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf"
+      media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"""
+    package = """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Split Story Collection</dc:title>
+    <dc:creator>Fixture Author</dc:creator>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="title-page" href="title-page.xhtml" media-type="application/xhtml+xml"/>
+    <item id="title-1" href="title-1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="body-1" href="body-1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="title-2" href="title-2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="body-2" href="body-2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="promo" href="promo.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="title-page"/>
+    <itemref idref="title-1"/>
+    <itemref idref="body-1"/>
+    <itemref idref="title-2"/>
+    <itemref idref="body-2"/>
+    <itemref idref="promo"/>
+  </spine>
+</package>
+"""
+    ncx = """<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <docTitle><text>Split Story Collection</text></docTitle>
+  <navMap>
+    <navPoint id="title-page" playOrder="1">
+      <navLabel><text>书名页</text></navLabel>
+      <content src="title-page.xhtml"/>
+    </navPoint>
+    <navPoint id="story-1" playOrder="2">
+      <navLabel><text>Story One</text></navLabel>
+      <content src="title-1.xhtml"/>
+    </navPoint>
+    <navPoint id="story-2" playOrder="3">
+      <navLabel><text>Story Two</text></navLabel>
+      <content src="title-2.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>
+"""
+    documents = {
+        "title-page.xhtml": "<html><head><title>Collection</title></head>"
+        "<body><p>书名页</p><p>Fixture Author</p></body></html>",
+        "title-1.xhtml": "<html><head><title>Collection</title></head>"
+        "<body><p>Story One</p></body></html>",
+        "body-1.xhtml": "<html><head><title>Collection</title></head>"
+        "<body><p>The first story body is here.</p></body></html>",
+        "title-2.xhtml": "<html><head><title>Collection</title></head>"
+        "<body><p>Story Two</p><p>A case note.</p></body></html>",
+        "body-2.xhtml": "<html><head><title>Collection</title></head>"
+        "<body><p>The second story body is here.</p></body></html>",
+        "promo.xhtml": "<html><head><title>Other Book</title></head>"
+        "<body><p>Promotional material must stay outside the last story.</p></body></html>",
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr("META-INF/container.xml", container)
+        archive.writestr("OEBPS/content.opf", package)
+        archive.writestr("OEBPS/toc.ncx", ncx)
+        for href, html in documents.items():
+            archive.writestr(f"OEBPS/{href}", html)
+
+
 def write_epub3_nav_epub(
     path: Path,
     *,
@@ -238,6 +314,32 @@ def test_epub_parser_uses_nested_ncx_leaf_chapters(
     assert parsed.chapters[0]["text"] == "正文 1。"
     assert parsed.chapters[0]["structure_source"] == "epub_ncx"
     assert parsed.chapters[0]["structure_confidence"] == "high"
+
+
+def test_epub_parser_merges_body_after_separate_ncx_title_page(
+    local_tmp_path: Path,
+) -> None:
+    path = local_tmp_path / "split-title-body-ncx.epub"
+    write_split_title_body_ncx_epub(path)
+
+    parsed = parse_epub(path)
+
+    assert parsed.parser_version == "epub-structure-v2"
+    assert [chapter["title"] for chapter in parsed.chapters] == [
+        "Story One",
+        "Story Two",
+    ]
+    assert parsed.chapters[0]["text"] == "The first story body is here."
+    assert parsed.chapters[1]["text"] == (
+        "A case note.\n\nThe second story body is here."
+    )
+    assert "Promotional material" not in parsed.chapters[1]["text"]
+    assert parsed.chapters[0]["source_locator"] == {
+        "format": "epub",
+        "resource": "OEBPS/title-1.xhtml",
+        "fragment": "",
+        "spine_index": 1,
+    }
 
 
 def test_epub3_nav_preserves_nested_structure_and_reader_semantics(

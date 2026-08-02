@@ -97,7 +97,7 @@ def test_reviewed_structure_can_split_merge_and_preserve_every_block() -> None:
     assert book_import.structure_source == "manual_review"
     assert book_import.structure_confidence == "high"
     assert book_import.structure_requires_review is False
-    assert book_import.structure_version.startswith("epub-structure-v1-manual-")
+    assert book_import.structure_version.startswith("epub-structure-v2-manual-")
 
 
 def test_reviewed_structure_rejects_missing_or_duplicated_blocks() -> None:

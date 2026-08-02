@@ -194,8 +194,8 @@ def test_retry_reparses_an_epub_created_by_an_older_parser(
 
     def fake_reparse(session, *, book_import, edition) -> bool:
         del session
-        book_import.parser_version = "epub-structure-v1"
-        book_import.structure_version = "epub-structure-v1-fixture"
+        book_import.parser_version = "epub-structure-v2"
+        book_import.structure_version = "epub-structure-v2-fixture"
         book_import.structure_source = "epub_ncx"
         book_import.structure_confidence = "high"
         book_import.structure_requires_review = False
@@ -210,7 +210,7 @@ def test_retry_reparses_an_epub_created_by_an_older_parser(
                     "resource": "OEBPS/part.xhtml",
                     "fragment": f"chapter-{number}",
                 },
-                "structure_version": "epub-structure-v1-fixture",
+                "structure_version": "epub-structure-v2-fixture",
             }
             for number in range(1, 33)
         ]
@@ -313,7 +313,7 @@ def test_retry_reparses_an_epub_created_by_an_older_parser(
         assert saved_job is not None
         assert saved_import is not None
         assert saved_job.result_summary == {}
-        assert saved_job.structure_version == "epub-structure-v1-fixture"
+        assert saved_job.structure_version == "epub-structure-v2-fixture"
         assert saved_import.chapter_count == 32
         session.delete(saved_job)
         session.delete(saved_import)
