@@ -25,7 +25,6 @@ type PrivateLibraryState = {
   error: string;
 };
 const emptyPrivateItems: LibraryItem[] = [];
-const filters = ["全部", "本格", "密室", "叙述性诡计", "时间诡计"];
 
 const fallbackWorks: ArchiveWork[] = demoWorks.map((work) => ({
   id: null,
@@ -71,6 +70,10 @@ export function ArchiveBrowser({ initialScope = "public" }: { initialScope?: Sco
   const privateItems = activePrivateLibrary?.items ?? emptyPrivateItems;
   const privateLoading = Boolean(user) && (!activePrivateLibrary || activePrivateLibrary.loading);
   const privateLoadError = activePrivateLibrary?.error ?? "";
+  const publicFilters = useMemo(
+    () => ["全部", ...new Set(publicWorks.flatMap((work) => work.tags))],
+    [publicWorks],
+  );
   const privateFilters = useMemo(
     () => ["全部", ...new Set(privateItems.flatMap((item) => item.tags))],
     [privateItems],
@@ -209,7 +212,7 @@ export function ArchiveBrowser({ initialScope = "public" }: { initialScope?: Sco
         </div>
         {scope === "public" && <div className="filter-row">
           <Filter size={16} />
-          {filters.map((filter) => (
+          {publicFilters.map((filter) => (
             <button key={filter} className={filter === activeFilter ? "filter-chip active" : "filter-chip"} onClick={() => setActiveFilter(filter)} type="button">
               {filter}
             </button>

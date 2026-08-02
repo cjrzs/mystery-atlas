@@ -16,12 +16,12 @@ def test_health(client: TestClient) -> None:
     assert response.json()["status"] == "ok"
 
 
-def test_graph_obeys_chapter_horizon(client: TestClient) -> None:
-    response = client.get("/api/v1/works/fog-harbor-clocktower/graph?through_chapter=2")
-    assert response.status_code == 200
-    payload = response.json()
-    assert all(node["first_chapter"] <= 2 for node in payload["nodes"])
-    assert all(edge["first_chapter"] <= 2 for edge in payload["edges"])
+def test_removed_demo_work_is_not_exposed(client: TestClient) -> None:
+    works = client.get("/api/v1/works")
+    assert works.status_code == 200
+    assert all(item["slug"] != "fog-harbor-clocktower" for item in works.json())
+    assert client.get("/api/v1/works/fog-harbor-clocktower").status_code == 404
+    assert client.get("/api/v1/works/fog-harbor-clocktower/graph").status_code == 404
 
 
 def test_unknown_work_returns_404(client: TestClient) -> None:

@@ -31,7 +31,6 @@ import {
   Minimize2,
   PanelLeftClose,
   PanelRightClose,
-  Search,
   Send,
   SlidersHorizontal,
   Sparkles,
@@ -671,9 +670,6 @@ export function Workbench({
         >
           {truthMode ? <EyeOff size={15} /> : <Eye size={15} />}
           {truthMode ? "退出真相" : "真相模式"}
-        </button>
-        <button className="icon-button" type="button" aria-label="搜索本书">
-          <Search size={18} />
         </button>
         <Link
           className="icon-button"

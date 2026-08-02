@@ -4,7 +4,6 @@ from sqlalchemy.orm import Session
 
 from ..analysis_views import workbench_analysis
 from ..database import get_session
-from ..demo import EDGES, NODES, WORKS
 from ..models import (
     BookImport,
     CaseRecord,
@@ -31,10 +30,7 @@ router = APIRouter(prefix="/works", tags=["public works"])
 
 
 def work_tags(work: Work) -> list[str]:
-    if work.tags:
-        return list(work.tags)
-    demo = next((item for item in WORKS if item.slug == work.slug), None)
-    return list(demo.tags) if demo else []
+    return list(work.tags or [])
 
 
 def work_summary(work: Work, session: Session) -> WorkSummary:
@@ -79,9 +75,7 @@ def list_works(session: Session = Depends(get_session)) -> list[WorkSummary]:
             .order_by(Work.updated_at.desc())
         )
     )
-    summaries = [work_summary(work, session) for work in database_works]
-    known_slugs = {item.slug for item in summaries}
-    return summaries + [item for item in WORKS if item.slug not in known_slugs]
+    return [work_summary(work, session) for work in database_works]
 
 
 @router.get("/{slug}", response_model=WorkSummary)
@@ -91,10 +85,7 @@ def get_work(slug: str, session: Session = Depends(get_session)) -> WorkSummary:
     )
     if work is not None:
         return work_summary(work, session)
-    demo = next((item for item in WORKS if item.slug == slug), None)
-    if demo is None:
-        raise HTTPException(status_code=404, detail="作品不存在")
-    return demo
+    raise HTTPException(status_code=404, detail="作品不存在")
 
 
 @router.get(
@@ -247,21 +238,4 @@ def get_graph(
                 for relation in relations
             ],
         )
-    if not any(item.slug == slug for item in WORKS):
-        raise HTTPException(status_code=404, detail="作品不存在")
-
-    visible_nodes = [item for item in NODES if item.first_chapter <= through_chapter]
-    node_ids = {item.id for item in visible_nodes}
-    visible_edges = [
-        item
-        for item in EDGES
-        if item.first_chapter <= through_chapter
-        and item.source in node_ids
-        and item.target in node_ids
-    ]
-    return GraphSnapshot(
-        work_slug=slug,
-        through_chapter=through_chapter,
-        nodes=visible_nodes,
-        edges=visible_edges,
-    )
+    raise HTTPException(status_code=404, detail="作品不存在")

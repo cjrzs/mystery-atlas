@@ -41,6 +41,20 @@ test("archive controls share one responsive toolbar row", async () => {
   assert.match(styles, /\.archive-search\s*\{[\s\S]*flex:\s*1/);
 });
 
+test("unused header and workbench search controls are removed", async () => {
+  const appHeader = await source("apps/web/src/components/app-header.tsx");
+  const workbench = await source("apps/web/src/components/workbench.tsx");
+  const styles = await source("apps/web/src/app/globals.css");
+
+  assert.doesNotMatch(appHeader, /global-search|搜索全部档案|Ctrl K/);
+  assert.doesNotMatch(workbench, /aria-label="搜索本书"/);
+  assert.doesNotMatch(styles, /\.global-search/);
+  assert.match(
+    styles,
+    /\.app-header > \.account-menu,[\s\S]*margin-left:\s*auto/,
+  );
+});
+
 test("private library failures are scoped to the private tab", async () => {
   const archiveBrowser = await source("apps/web/src/components/archive-browser.tsx");
 
@@ -70,6 +84,24 @@ test("private archives expose book-tag filters", async () => {
   assert.match(archiveBrowser, /item\.tags\.includes\(activePrivateFilter\)/);
   assert.match(archiveBrowser, /scope === "private"[\s\S]*privateFilters\.map/);
   assert.doesNotMatch(archiveBrowser, /value:\s*"private_upload"/);
+});
+
+test("public archives expose filters from the tags on current books", async () => {
+  const archiveBrowser = await source("apps/web/src/components/archive-browser.tsx");
+
+  assert.match(archiveBrowser, /publicWorks\.flatMap\(\(work\) => work\.tags\)/);
+  assert.match(archiveBrowser, /activeFilter/);
+  assert.match(archiveBrowser, /work\.tags\.includes\(activeFilter\)/);
+  assert.match(archiveBrowser, /scope === "public"[\s\S]*publicFilters\.map/);
+  assert.doesNotMatch(archiveBrowser, /const filters\s*=\s*\[/);
+});
+
+test("the removed fog harbor demo book is not exposed", async () => {
+  const demoData = await source("apps/web/src/lib/demo-data.ts");
+  const publicRouter = await source("apps/api/src/mystery_atlas_api/routers/public.py");
+
+  assert.doesNotMatch(demoData, /title:\s*"雾港钟楼"/);
+  assert.doesNotMatch(publicRouter, /from \.\.demo import/);
 });
 
 test("import confirmation only asks for archive type after AI metadata preparse", async () => {

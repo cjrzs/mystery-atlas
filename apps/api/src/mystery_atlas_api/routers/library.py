@@ -7,7 +7,6 @@ from ..analysis_retry import can_manage_analysis, can_retry_from_checkpoint
 from ..analysis_views import workbench_analysis
 from ..config import get_settings
 from ..database import get_session
-from ..demo import WORKS
 from ..models import AnalysisJob, BookImport, Edition, PrivateLibraryBook, User, Work
 from ..reader_views import reader_chapter, reader_response
 from ..schemas import (
@@ -24,12 +23,7 @@ router = APIRouter(prefix="/library", tags=["private archive"])
 
 
 def work_tags(work: Work | None) -> list[str]:
-    if work is None:
-        return []
-    if work.tags:
-        return list(work.tags)
-    demo = next((item for item in WORKS if item.slug == work.slug), None)
-    return list(demo.tags) if demo else []
+    return list(work.tags or []) if work else []
 
 
 def serialize_item(item: PrivateLibraryBook, user: User, session: Session) -> LibraryItemResponse:

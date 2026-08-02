@@ -17,22 +17,6 @@ export type ArchiveWork = {
 
 export const archiveWorks: ArchiveWork[] = [
   {
-    slug: "fog-harbor-clocktower",
-    title: "雾港钟楼",
-    author: "林砚川",
-    subtitle: "钟声停止后的第七码头",
-    region: "中国",
-    year: "2024",
-    tags: ["本格", "暴风雪山庄", "时间诡计"],
-    cases: 3,
-    people: 18,
-    clues: 42,
-    progress: 100,
-    status: "已核验",
-    updatedAt: "今天 21:40",
-    cover: "teal",
-  },
-  {
     slug: "silent-gallery",
     title: "无声画廊",
     author: "藤原澄子",
@@ -230,4 +214,3 @@ export const evidenceItems = [
   { id: "c-29", title: "独立报时连杆", chapter: 8, type: "客观描写", state: "已确认", detail: "备用连杆可绕过停止的机芯，在预设时间单独触发钟锤。" },
   { id: "c-34", title: "东栈桥铜屑", chapter: 10, type: "AI 推断", state: "推测", detail: "铜屑成分与钟楼检修梯一致，但也可能来自船厂旧零件。" },
 ];
-
