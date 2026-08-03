@@ -134,6 +134,21 @@ test("low-confidence EPUB structure can be reviewed without losing source blocks
   assert.match(importPage, /保存结构并继续/);
 });
 
+test("import history stays lightweight and ignores stale refresh responses", async () => {
+  const importPage = await source("apps/web/src/app/library/import/page.tsx");
+  const apiTypes = await source("apps/web/src/lib/api.ts");
+
+  assert.match(apiTypes, /type BookImportSummary = Omit<BookImport, "chapters" \| "structure_tree">/);
+  assert.match(importPage, /apiRequest<BookImportSummary\[]>\("\/imports"\)/);
+  assert.match(importPage, /const requestId = \+\+refreshGeneration\.current/);
+  assert.match(importPage, /if \(requestId !== refreshGeneration\.current\) return/);
+  assert.doesNotMatch(importPage, /setInterval/);
+  assert.match(
+    importPage,
+    /apiRequest<BookImport>\(`\/imports\/\$\{item\.id\}`\)/,
+  );
+});
+
 test("workbench analysis consoles use the selected book instead of demo fixtures", async () => {
   const workbench = await source("apps/web/src/components/workbench.tsx");
   const apiTypes = await source("apps/web/src/lib/api.ts");

@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { AppHeader } from "@/components/app-header";
 import { useAuth } from "@/components/auth-provider";
-import { ApiError, apiRequest, type BookImport } from "@/lib/api";
+import { ApiError, apiRequest, type BookImport, type BookImportSummary } from "@/lib/api";
 
 const stageNames: Record<string, string> = {
   waiting: "等待解析",
@@ -68,17 +68,28 @@ function structureDrafts(item: BookImport): StructureDraft[] {
 export default function ImportPage() {
   const { user, loading } = useAuth();
   const fileInput = useRef<HTMLInputElement>(null);
+  const refreshGeneration = useRef(0);
+  const optimisticImports = useRef(new Map<string, BookImportSummary>());
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [imports, setImports] = useState<BookImport[]>([]);
+  const [imports, setImports] = useState<BookImportSummary[]>([]);
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState("");
 
   const refreshImports = useCallback(async () => {
     if (!user) return;
+    const requestId = ++refreshGeneration.current;
     try {
-      setImports(await apiRequest<BookImport[]>("/imports"));
+      const items = await apiRequest<BookImportSummary[]>("/imports");
+      if (requestId !== refreshGeneration.current) return;
+      const serverIds = new Set(items.map((item) => item.id));
+      for (const itemId of serverIds) optimisticImports.current.delete(itemId);
+      const pending = [...optimisticImports.current.values()].filter(
+        (item) => !serverIds.has(item.id),
+      );
+      setImports([...pending, ...items]);
     } catch (caught) {
+      if (requestId !== refreshGeneration.current) return;
       if (!(caught instanceof ApiError && caught.status === 401)) {
         setError(caught instanceof ApiError ? caught.message : "读取上传记录失败");
       }
@@ -87,21 +98,23 @@ export default function ImportPage() {
 
   useEffect(() => {
     if (!user) return;
-    let active = true;
-    apiRequest<BookImport[]>("/imports")
-      .then((items) => { if (active) setImports(items); })
-      .catch((caught: unknown) => {
-        if (active && !(caught instanceof ApiError && caught.status === 401)) {
-          setError(caught instanceof ApiError ? caught.message : "读取上传记录失败");
-        }
-      });
-    return () => { active = false; };
-  }, [user]);
+    void refreshImports();
+    return () => { refreshGeneration.current += 1; };
+  }, [user, refreshImports]);
 
   useEffect(() => {
     if (!imports.some((item) => item.status === "queued" || item.status === "parsing")) return;
-    const timer = window.setInterval(() => void refreshImports(), 1500);
-    return () => window.clearInterval(timer);
+    let active = true;
+    let timer = 0;
+    const poll = async (): Promise<void> => {
+      await refreshImports();
+      if (active) timer = window.setTimeout(() => void poll(), 1500);
+    };
+    timer = window.setTimeout(() => void poll(), 1500);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
   }, [imports, refreshImports]);
 
   const chooseFile = (file?: File) => {
@@ -129,6 +142,7 @@ export default function ImportPage() {
     body.append("file", selectedFile);
     try {
       const created = await apiRequest<BookImport>("/imports", { method: "POST", body });
+      optimisticImports.current.set(created.id, created);
       setImports((current) => [created, ...current.filter((item) => item.id !== created.id)]);
       setSelectedFile(null);
       if (fileInput.current) fileInput.current.value = "";
@@ -179,14 +193,32 @@ export default function ImportPage() {
   );
 }
 
-function ImportRecord({ item, onChanged }: { item: BookImport; onChanged: () => Promise<void> }) {
+function ImportRecord({ item, onChanged }: { item: BookImportSummary; onChanged: () => Promise<void> }) {
   const active = item.status === "queued" || item.status === "parsing";
   const awaiting = item.status === "completed" && !item.work_id && !item.structure_requires_review;
   const [visibility, setVisibility] = useState<"private" | "public" | null>(null);
   const [saving, setSaving] = useState(false);
   const [savingStructure, setSavingStructure] = useState(false);
-  const [drafts, setDrafts] = useState<StructureDraft[]>(() => structureDrafts(item));
+  const [structureDetail, setStructureDetail] = useState<BookImport | null>(null);
+  const [drafts, setDrafts] = useState<StructureDraft[]>([]);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!item.structure_requires_review) return;
+    let active = true;
+    apiRequest<BookImport>(`/imports/${item.id}`)
+      .then((detail) => {
+        if (!active) return;
+        setStructureDetail(detail);
+        setDrafts(structureDrafts(detail));
+      })
+      .catch((caught: unknown) => {
+        if (active && !(caught instanceof ApiError && caught.status === 401)) {
+          setError(caught instanceof ApiError ? caught.message : "无法读取章节结构");
+        }
+      });
+    return () => { active = false; };
+  }, [item.id, item.structure_requires_review]);
 
   const updateDraft = (index: number, patch: Partial<StructureDraft>) => {
     setDrafts((current) => current.map((draft, draftIndex) => (
@@ -276,11 +308,12 @@ function ImportRecord({ item, onChanged }: { item: BookImport; onChanged: () => 
           <div><strong>请复核章节结构</strong><span>系统发现异常偏长章节。可改名和层级、合并相邻章节，或从内部标题处分拆；保存时会校验正文不丢失、不重复。</span></div>
         </div>
         {item.structure_warnings.length > 0 && <ul>{item.structure_warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
-        <div className="structure-chapter-list">
+        {!structureDetail && !error && <p><LoaderCircle className="spin" size={14} />正在读取章节结构</p>}
+        {structureDetail && <div className="structure-chapter-list">
           {drafts.map((draft, index) => {
             const segment = draft.segments.length === 1 ? draft.segments[0] : null;
             const source = segment
-              ? item.chapters.find((chapter) => chapter.number === segment.source_number)
+              ? structureDetail.chapters.find((chapter) => chapter.number === segment.source_number)
               : null;
             const headings = (source?.blocks ?? []).flatMap((block, blockIndex) => (
               block.type === "heading" && segment && blockIndex > segment.start_block && blockIndex < segment.end_block
@@ -297,9 +330,9 @@ function ImportRecord({ item, onChanged }: { item: BookImport; onChanged: () => 
               </div>
             </div>;
           })}
-        </div>
+        </div>}
         {error && <p className="form-error"><AlertCircle size={14} />{error}</p>}
-        <button className="primary-command" disabled={drafts.length === 0 || savingStructure} onClick={() => void saveStructure()} type="button">{savingStructure ? <LoaderCircle className="spin" size={15} /> : <BookCheck size={15} />}{savingStructure ? "正在保存" : "保存结构并继续"}</button>
+        {structureDetail && <button className="primary-command" disabled={drafts.length === 0 || savingStructure} onClick={() => void saveStructure()} type="button">{savingStructure ? <LoaderCircle className="spin" size={15} /> : <BookCheck size={15} />}{savingStructure ? "正在保存" : "保存结构并继续"}</button>}
       </div>}
       {awaiting && <div className="archive-confirmation">
         <div className="metadata-preview">

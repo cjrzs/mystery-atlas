@@ -1,7 +1,10 @@
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from mystery_atlas_api.database import SessionLocal
 from mystery_atlas_api.main import app
+from mystery_atlas_api.models import BookImport, User
 
 
 @pytest.fixture(scope="module")
@@ -183,6 +186,50 @@ def test_upload_and_parse_txt(client: TestClient) -> None:
     )
     assert resolved.status_code == 200
     assert resolved.json()["status"] == "resolved"
+
+
+def test_import_list_omits_full_book_content(client: TestClient) -> None:
+    with SessionLocal() as session:
+        user = session.scalar(select(User).where(User.email == "reader@example.com"))
+        assert user is not None
+        book_import = BookImport(
+            user_id=user.id,
+            original_name="超大章节测试.txt",
+            stored_path="test://large-import",
+            source_format="txt",
+            size_bytes=2_000_000,
+            content_hash="f" * 64,
+            status="completed",
+            stage="structure_review_required",
+            progress=100,
+            detected_title="超大章节测试",
+            chapter_count=1,
+            chapters=[
+                {
+                    "number": 1,
+                    "title": "第一章",
+                    "characters": 2_000_000,
+                    "blocks": [{"type": "paragraph", "text": "字" * 2_000_000}],
+                }
+            ],
+            structure_tree=[{"title": "第一章", "payload": "树" * 200_000}],
+            structure_requires_review=True,
+        )
+        session.add(book_import)
+        session.commit()
+        import_id = book_import.id
+
+    listed = client.get("/api/v1/imports")
+    assert listed.status_code == 200
+    listed_item = next(item for item in listed.json() if item["id"] == import_id)
+    assert "chapters" not in listed_item
+    assert "structure_tree" not in listed_item
+    assert len(listed.content) < 100_000
+
+    detail = client.get(f"/api/v1/imports/{import_id}")
+    assert detail.status_code == 200
+    assert detail.json()["chapters"][0]["blocks"][0]["text"].startswith("字")
+    assert detail.json()["structure_tree"][0]["title"] == "第一章"
 
 
 def test_admin_route_requires_session() -> None:

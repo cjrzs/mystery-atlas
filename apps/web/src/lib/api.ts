@@ -46,6 +46,8 @@ export type BookImport = {
   error: string | null;
 };
 
+export type BookImportSummary = Omit<BookImport, "chapters" | "structure_tree">;
+
 export type ArchiveWork = {
   id: string | null;
   slug: string;

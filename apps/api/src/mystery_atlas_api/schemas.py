@@ -33,7 +33,7 @@ class ReaderPreferences(BaseModel):
     theme: Literal["light", "sepia", "dark"] = "sepia"
 
 
-class BookImportResponse(BaseModel):
+class BookImportSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -54,17 +54,20 @@ class BookImportResponse(BaseModel):
     work_id: str | None
     edition_id: str | None
     chapter_count: int
-    chapters: list[dict]
     language: str | None = None
     parser_version: str | None = None
     structure_version: str | None = None
     structure_source: str | None = None
     structure_confidence: str = "low"
     structure_warnings: list[str] = Field(default_factory=list)
-    structure_tree: list[dict] = Field(default_factory=list)
     structure_requires_review: bool = False
     preview: str
     error: str | None
+
+
+class BookImportResponse(BookImportSummaryResponse):
+    chapters: list[dict]
+    structure_tree: list[dict] = Field(default_factory=list)
 
 
 class WorkSummary(BaseModel):

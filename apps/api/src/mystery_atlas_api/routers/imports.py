@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from ..analysis_dispatch import schedule_analysis
 from ..book_metadata import suggest_book_metadata
@@ -29,6 +29,7 @@ from ..parsers import parse_book
 from ..schemas import (
     AnalysisJobDetailResponse,
     BookImportResponse,
+    BookImportSummaryResponse,
     FinalizeImportRequest,
     ReviewBookStructureRequest,
 )
@@ -383,7 +384,7 @@ def review_import_structure(
     return book_import
 
 
-@router.get("", response_model=list[BookImportResponse])
+@router.get("", response_model=list[BookImportSummaryResponse])
 def list_imports(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
@@ -391,6 +392,37 @@ def list_imports(
     return list(
         session.scalars(
             select(BookImport)
+            .options(
+                load_only(
+                    BookImport.id,
+                    BookImport.original_name,
+                    BookImport.source_format,
+                    BookImport.size_bytes,
+                    BookImport.status,
+                    BookImport.stage,
+                    BookImport.progress,
+                    BookImport.detected_title,
+                    BookImport.detected_author,
+                    BookImport.detected_tags,
+                    BookImport.publisher,
+                    BookImport.translator,
+                    BookImport.isbn,
+                    BookImport.visibility,
+                    BookImport.rights_confirmed,
+                    BookImport.work_id,
+                    BookImport.edition_id,
+                    BookImport.chapter_count,
+                    BookImport.language,
+                    BookImport.parser_version,
+                    BookImport.structure_version,
+                    BookImport.structure_source,
+                    BookImport.structure_confidence,
+                    BookImport.structure_warnings,
+                    BookImport.structure_requires_review,
+                    BookImport.preview,
+                    BookImport.error,
+                )
+            )
             .where(BookImport.user_id == user.id)
             .order_by(BookImport.created_at.desc())
         )
